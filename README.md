@@ -61,6 +61,21 @@ pnpm smoke         # 真实 DSH 集成烟测（约 30–60s）
 
 worker 通过 **stdio** 工作，自身不监听任何端口。需要它时由 leader 拉起子进程。
 
+## 部署（源码与运行分离）
+
+源码仓库只用于开发（`pnpm build` / `pnpm test`）；**MCP 客户端只加载运行目录**，不要指向仓库内的 `dist`。
+
+```powershell
+# 在源码仓库里构建并部署到运行目录（示例：D:\dsh-mcp-worker）
+pnpm build
+pwsh -File scripts/deploy.ps1 -Target D:\dsh-mcp-worker
+```
+
+- MCP 入口应为运行目录：`D:\dsh-mcp-worker\dist\index.js`；
+- 运行目录包含 `dist/` + 生产依赖（`pnpm install --prod`）+ package 元数据，不含测试/开发依赖；
+- 更新流程：`git pull` → `pnpm install` → `pnpm test` → `scripts/deploy.ps1` → 重启 leader 会话；
+- 默认运行目录可用 `DSH_MCP_WORKER_HOME` 指定，也可直接 `pnpm deploy`（等价于执行该脚本）。
+
 ## 接入 leader
 
 ### 1) Claude Code（最省事）

@@ -18,7 +18,8 @@
     "smoke:http": "tsx test/http-smoke.ts",
     "start": "node dist/index.js",
     "measure:ab": "node scripts/measure-goals.mjs ab",
-    "measure:leader": "node scripts/leader-usage.mjs"
+    "measure:leader": "node scripts/leader-usage.mjs",
+    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -31,11 +32,3 @@
     "vitest": "^2.1.8"
   }
 }
-
-
-
-
-
-
-
-
