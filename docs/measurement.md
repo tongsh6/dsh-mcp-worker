@@ -43,7 +43,7 @@
 
 ```powershell
 # A/B 对照（Claude Code 自动计量；会真实消耗 leader 额度，建议先小任务试跑）
-cd D:\work\workspace\code\dsh-mcp-worker
+cd D:\github\dsh-mcp-worker
 node scripts/measure-goals.mjs ab `
   --cwd D:\work\your-repo `
   --task "统计 src 下 .ts 文件数量并列出最大的 3 个（只读分析，不要改文件）" `

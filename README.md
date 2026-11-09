@@ -52,7 +52,7 @@ dsh-mcp-worker（本进程）
 ## 快速开始
 
 ```powershell
-cd D:\work\workspace\code\dsh-mcp-worker
+cd D:\github\dsh-mcp-worker
 pnpm install
 pnpm build
 pnpm test          # 103 个单测
@@ -66,7 +66,7 @@ worker 通过 **stdio** 工作，自身不监听任何端口。需要它时由 l
 ### 1) Claude Code（最省事）
 
 ```powershell
-claude mcp add --scope user --transport stdio dsh -- node "D:\work\workspace\code\dsh-mcp-worker\dist\index.js"
+claude mcp add --scope user --transport stdio dsh -- node "D:\github\dsh-mcp-worker\dist\index.js"
 claude mcp list
 claude mcp get dsh
 ```
@@ -74,7 +74,7 @@ claude mcp get dsh
 带环境变量时注意 `--env` 的位置（放在 server 名之前）：
 
 ```powershell
-claude mcp add --scope user --transport stdio --env DSH_MCP_DEFAULT_CWD="D:\work\repo" dsh -- node "D:\work\workspace\code\dsh-mcp-worker\dist\index.js"
+claude mcp add --scope user --transport stdio --env DSH_MCP_DEFAULT_CWD="D:\work\repo" dsh -- node "D:\github\dsh-mcp-worker\dist\index.js"
 ```
 
 等价 `.mcp.json` 见 [examples/claude-mcp.json](examples/claude-mcp.json)。
@@ -96,7 +96,7 @@ claude mcp add --scope user --transport stdio --env DSH_MCP_DEFAULT_CWD="D:\work
 ```toml
 [mcp_servers.dsh]
 command = "node"
-args = ["D:\\work\\workspace\\code\\dsh-mcp-worker\\dist\\index.js"]
+args = ["D:\\github\\dsh-mcp-worker\\dist\\index.js"]
 startup_timeout_sec = 30          # 默认 10；worker 自身启动很快，留余量
 tool_timeout_sec = 300            # 默认 60；allow dsh_status 长轮询（wait_s≤120s）
 enabled_tools = ["dsh_run", "dsh_status", "dsh_result", "dsh_cancel", "dsh_describe", "dsh_tasks", "dsh_audit", "dsh_read_result", "dsh_batch_run", "dsh_batch_status", "dsh_batch_result", "dsh_search", "dsh_metrics"]
@@ -126,7 +126,7 @@ ChatGPT web 只接受**远程 MCP**（Streamable HTTP / SSE），不接受 stdio
 - **推荐**：OpenAI Secure MCP Tunnel（需要 Platform 组织 + `tunnel_id` + runtime API key）：
   ```bash
   tunnel-client init --sample sample_mcp_stdio_local --profile dsh-local \
-    --tunnel-id tunnel_xxxxxxxx --mcp-command "node D:\\work\\workspace\\code\\dsh-mcp-worker\\dist\\index.js"
+    --tunnel-id tunnel_xxxxxxxx --mcp-command "node D:\\github\\dsh-mcp-worker\\dist\\index.js"
   tunnel-client run --profile dsh-local
   ```
   然后在 ChatGPT → Plugins → `+` → Add custom MCP server → Connection 选 Tunnel → Create。

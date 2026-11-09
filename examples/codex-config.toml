@@ -5,7 +5,7 @@
 
 [mcp_servers.dsh]
 command = "node"
-args = ["D:\\work\\workspace\\code\\dsh-mcp-worker\\dist\\index.js"]
+args = ["D:\\github\\dsh-mcp-worker\\dist\\index.js"]
 startup_timeout_sec = 30          # 默认 10；worker 自身启动很快，留余量
 tool_timeout_sec = 300            # 默认 60；allow dsh_status 长轮询（wait_s≤120s）
 enabled_tools = ["dsh_run", "dsh_status", "dsh_result", "dsh_cancel", "dsh_describe", "dsh_tasks", "dsh_audit", "dsh_read_result", "dsh_batch_run", "dsh_batch_status", "dsh_batch_result", "dsh_search", "dsh_metrics"]
