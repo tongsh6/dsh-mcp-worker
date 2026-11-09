@@ -113,6 +113,10 @@ export class TaskManager {
     await this.options.store.init();
     for (const record of await this.options.store.loadAll()) {
       if (!isTerminalStatus(record.status)) {
+        // 多 worker 共享任务目录：别的活 worker 拥有的任务不能由本进程判定为 interrupted
+        const ownedByLiveWorker =
+          record.workerPid !== undefined && record.workerPid !== process.pid && isProcessAlive(record.workerPid);
+        if (ownedByLiveWorker) continue;
         record.status = 'failed';
         record.error = 'interrupted: worker restarted before the task finished';
         record.endedAt = this.now();
@@ -169,6 +173,7 @@ export class TaskManager {
       permissionMode,
       timeoutMs: input.timeoutMs ?? config.defaultTimeoutMs,
       createdAt: this.now(),
+      workerPid: process.pid,
       events: [],
       timedOut: false,
     };
@@ -788,6 +793,17 @@ function lastAssistantText(record: TaskRecord): string | null {
     }
   }
   return null;
+}
+
+/** 判断进程是否仍存活（用于多 worker 共享任务目录时避免误判 interrupted）。 */
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 失败分类：便于 leader 决定「重试 / 修环境 / 换粒度」。 */

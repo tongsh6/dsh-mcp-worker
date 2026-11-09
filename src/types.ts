@@ -74,6 +74,8 @@ export interface TaskRecord {
   worktree?: { path: string; branch: string };
   /** 切换 worktree 前的原始 cwd。 */
   originalCwd?: string;
+  /** 创建该任务的 worker 进程 PID；多 worker 共享任务目录时用于判断任务是否仍被其他活进程执行。 */
+  workerPid?: number;
   events: RunEvent[];
 }
 

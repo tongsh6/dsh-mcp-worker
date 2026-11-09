@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
 import { TaskManager } from '../src/task-manager.js';
 import type { TaskRecord } from '../src/types.js';
 import { MemoryStore, makeFakeRunner, makeTestConfig, waitFor } from './helpers.js';
@@ -146,5 +147,55 @@ describe('TaskManager', () => {
     await waitFor(() => isTerminal(manager.get(record.id)));
     const persisted = store.records.get(record.id);
     expect(persisted?.events.length).toBeGreaterThan(0);
+  });
+
+  it('多 worker 共享任务目录：其他活 worker 拥有的 running 任务不被误标 interrupted', async () => {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', windowsHide: true });
+    try {
+      if (!child.pid) throw new Error('子进程未启动');
+      const store = new MemoryStore();
+      const owned: TaskRecord = {
+        id: 'live-owner',
+        status: 'running',
+        task: 'running-elsewhere',
+        cwd: 'C:\\proj',
+        permissionMode: 'workspace-write',
+        createdAt: Date.now(),
+        workerPid: child.pid,
+        events: [],
+        timedOut: false,
+      };
+      await store.saveMeta(owned);
+      const { manager } = makeManager({ store });
+      await manager.init();
+      // 本 worker 不接管该任务，也不应改写它的状态
+      expect(manager.get('live-owner')).toBeUndefined();
+      expect((await store.loadAll()).find((record) => record.id === 'live-owner')?.status).toBe('running');
+    } finally {
+      child.kill();
+    }
+  });
+
+  it('owner 进程已退出时仍标记 interrupted', async () => {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', windowsHide: true });
+    if (!child.pid) throw new Error('子进程未启动');
+    const pid = child.pid;
+    child.kill();
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    const store = new MemoryStore();
+    await store.saveMeta({
+      id: 'dead-owner',
+      status: 'running',
+      task: 'x',
+      cwd: 'C:\\proj',
+      permissionMode: 'workspace-write',
+      createdAt: Date.now(),
+      workerPid: pid,
+      events: [],
+      timedOut: false,
+    });
+    const { manager } = makeManager({ store });
+    await manager.init();
+    expect(manager.get('dead-owner')?.status).toBe('failed');
   });
 });
