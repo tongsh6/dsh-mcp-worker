@@ -25,9 +25,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
-          registry-url: https://registry.npmjs.org
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -38,7 +37,6 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # 无 NPM_TOKEN：npm Trusted Publishing 通过 GitHub OIDC 授权（需先在 npm 包设置里绑定本仓库/本 workflow）
       - name: Publish to npm
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

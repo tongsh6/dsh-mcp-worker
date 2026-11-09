@@ -422,22 +422,31 @@ pnpm build         # tsc 产物到 dist/
 
 ## 发布到 npm（维护者）
 
-发布由 **GitHub Actions** 完成（`.github/workflows/publish.yml`），不在本地 `npm publish`：
+采用 **npm Trusted Publishing（OIDC 绑定 GitHub Actions）**，CI 发布不需要 `NPM_TOKEN`。
 
-1. 在仓库 Settings → Secrets and variables → Actions 添加 `NPM_TOKEN`（npm Automation token，具备 publish 权限）；
-2. 更新版本并打 tag：
+1. **首次发布必须手动**（npm 上还不存在该包时无法配置 Trusted Publisher）：
    ```powershell
-   npm version patch --no-git-tag-version   # 或手动改 package.json
-   git add -A
-   git commit -m "chore(release): vX.Y.Z"
-   git tag vX.Y.Z
-   git push --follow-tags
+   npm login          # 浏览器/2FA
+   pnpm build
+   npm publish --access public
    ```
-3. tag 推送后 Actions 自动执行 `pnpm test` → `pnpm build` → `npm publish --access public --provenance`；
-4. 也可在 Actions → publish → Run workflow 手动触发（`workflow_dispatch`）。
+2. 在 npm 包页面 → Settings → Trusted Publishing → GitHub Actions：
+   - Organization/user：`tongsh6`
+   - Repository：`dsh-mcp-worker`
+   - Workflow filename：`publish.yml`
+   - 保存时按需输入 2FA。
+3. 之后发布只需打 tag：
+   ```powershell
+   npm version patch --no-git-tag-version
+   git add -A && git commit -m "chore(release): vX.Y.Z"
+   git tag vX.Y.Z && git push --follow-tags
+   ```
+   Actions 会执行 `pnpm test` → `pnpm build` → `npm publish --access public --provenance`（OIDC，无 token）。
+4. 也可在 Actions → publish → Run workflow 手动触发。
+
+> 注意：npm Trusted Publisher 要求使用较新的 npm CLI（workflow 里用 Node 24），且 workflow 文件名必须与配置一致。
 
 License：MIT（见 [LICENSE](LICENSE)）。
-
 ## 路线图
 
 - **M1 ✅ 已完成（2026-11-02）**：长驻 `dsh --profile sdk` 后端（默认），一次 initialize 后每任务只发 prompt；保留 `headless` fallback。
