@@ -3,7 +3,7 @@
     "dsh": {
       "type": "stdio",
       "command": "node",
-      "args": ["C:\\path\\to\\dsh-mcp-worker\\dist\\index.js"],
+      "args": ["C:\\path\\to\\pnpm-global\\dsh-mcp-worker\\dist\\index.js"],
       "env": {
         "DSH_MCP_PERMISSION_MODE": "auto"
       }

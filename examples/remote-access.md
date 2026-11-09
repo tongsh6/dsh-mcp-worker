@@ -9,7 +9,7 @@ $env:DSH_MCP_TRANSPORT = "http"
 $env:DSH_MCP_HTTP_HOST = "127.0.0.1"     # 只给本机；局域网用 0.0.0.0 且必须配 token
 $env:DSH_MCP_HTTP_PORT = "7391"
 $env:DSH_MCP_HTTP_TOKEN = "<至少 32 字节随机串>"
-node "C:\path\to\dsh-mcp-worker\dist\index.js"
+node "C:\path\to\pnpm-global\dsh-mcp-worker\dist\index.js"
 ```
 
 启动后：
@@ -54,7 +54,7 @@ Authorization = "Bearer <token>"
 # 用 tunnel-client 直接拉起本 worker 的 stdio 模式（注意：不是 http 模式）
 tunnel-client init --sample sample_mcp_stdio_local --profile dsh-local \
   --tunnel-id tunnel_xxxxxxxx \
-  --mcp-command "node C:\\path\\to\\dsh-mcp-worker\\dist\\index.js"
+  --mcp-command "node C:\\path\\to\\pnpm-global\\dsh-mcp-worker\\dist\\index.js"
 
 tunnel-client doctor --profile dsh-local --explain
 tunnel-client run    --profile dsh-local

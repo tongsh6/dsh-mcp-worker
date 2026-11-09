@@ -61,21 +61,26 @@ pnpm smoke         # 真实 DSH 集成烟测（约 30–60s）
 
 worker 通过 **stdio** 工作，自身不监听任何端口。需要它时由 leader 拉起子进程。
 
-## 部署（源码与运行分离）
+## 本机安装（推荐 pnpm 全局）
 
-源码仓库只用于开发（`pnpm build` / `pnpm test`）；**MCP 客户端只加载运行目录**，不要指向仓库内的 `dist`。
+源码仓库只用于开发（`pnpm build` / `pnpm test`）；**MCP 客户端加载 pnpm 全局安装的正式包**，不要指向源码仓库。
 
 ```powershell
-# 在源码仓库里构建并部署到运行目录（示例：D:\dsh-mcp-worker）
-pnpm build
-pwsh -File scripts/deploy.ps1 -Target D:\dsh-mcp-worker
+pnpm add -g dsh-mcp-worker@latest      # 安装/升级
+pwsh -File scripts/mcp-entry.ps1       # 输出 MCP 入口（pnpm 全局包内 dist/index.js）
 ```
 
-- MCP 入口应为运行目录：`D:\dsh-mcp-worker\dist\index.js`；
-- 运行目录包含 `dist/` + 生产依赖（`pnpm install --prod`）+ package 元数据，不含测试/开发依赖；
-- 更新流程：`git pull` → `pnpm install` → `pnpm test` → `scripts/deploy.ps1` → 重启 leader 会话；
-- 默认运行目录可用 `DSH_MCP_WORKER_HOME` 指定，也可直接 `pnpm deploy`（等价于执行该脚本）。
+把输出的入口配置给 leader（Codex/ChatGPT 的 `~/.codex/config.toml` 或 Claude Code）：
 
+```toml
+[mcp_servers.dsh]
+command = "node"
+args = ["<scripts/mcp-entry.ps1 输出的路径>"]
+```
+
+- 升级：`pnpm update -g dsh-mcp-worker` → 重启 leader 会话；若入口路径变化，用 `scripts/mcp-entry.ps1` 刷新配置；
+- **不要用 `cmd /c dsh-mcp-worker` 作为 MCP 入口**：cmd 包装下 `dsh_describe` 正常但真实任务会卡住（已实测），必须用 `node` + 全局包入口；
+- 源码开发调试可选：`scripts/deploy.ps1` 部署到独立目录（内容等价 npm 包），不用于本机日常使用。
 ## 通过 npm 使用
 
 包名：`dsh-mcp-worker`（只发布构建产物；本机仍需安装 DSH）。

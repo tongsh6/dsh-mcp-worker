@@ -18,7 +18,8 @@
     "start": "node dist/index.js",
     "measure:ab": "node scripts/measure-goals.mjs ab",
     "measure:leader": "node scripts/leader-usage.mjs",
-    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1"
+    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1",
+    "mcp:entry": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/mcp-entry.ps1"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
