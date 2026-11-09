@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "dsh": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["D:\\work\\workspace\\code\\dsh-mcp-worker\\dist\\index.js"],
+      "env": {
+        "DSH_MCP_TASKS_DIR": "C:\\Users\\tongs\\.dsh\\mcp-tasks",
+        "DSH_MCP_PERMISSION_MODE": "workspace-write",
+        "DSH_MCP_DEFAULT_CWD": ""
+      }
+    }
+  }
+}

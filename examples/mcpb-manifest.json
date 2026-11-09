@@ -1,0 +1,20 @@
+{
+  "manifest_version": "0.3",
+  "name": "dsh-mcp-worker",
+  "version": "0.1.0",
+  "description": "把本机 DSH（DeepSeek Harness）作为 MCP worker 暴露给 Claude Desktop",
+  "author": {
+    "name": "local"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "DSH_MCP_PERMISSION_MODE": "workspace-write"
+      }
+    }
+  }
+}

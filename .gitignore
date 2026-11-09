@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.log
+.dsh-mcp/
+test/.tmp/
+measure-runs/
