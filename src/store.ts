@@ -18,6 +18,9 @@ export interface TaskStore {
  * 重启后可恢复任务列表（进行中的任务会被标记为 interrupted）。
  */
 export class JsonlTaskStore implements TaskStore {
+  /** 同一任务的事件追加串行化：并发 appendFile 可能在多字节字符中间交错写，破坏原始 JSONL。 */
+  private readonly appendChains = new Map<string, Promise<void>>();
+
   constructor(private readonly root: string) {}
 
   async init(): Promise<void> {
@@ -39,9 +42,21 @@ export class JsonlTaskStore implements TaskStore {
   }
 
   async appendEvent(taskId: string, event: RunEvent): Promise<void> {
-    const dir = this.dirFor(taskId);
-    await mkdir(dir, { recursive: true });
-    await appendFile(join(dir, 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8');
+    const line = `${JSON.stringify(event)}\n`;
+    const previous = this.appendChains.get(taskId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const dir = this.dirFor(taskId);
+        await mkdir(dir, { recursive: true });
+        await appendFile(join(dir, 'events.jsonl'), line, 'utf8');
+      });
+    this.appendChains.set(taskId, next);
+    try {
+      await next;
+    } finally {
+      if (this.appendChains.get(taskId) === next) this.appendChains.delete(taskId);
+    }
   }
 
   async remove(taskId: string): Promise<void> {
