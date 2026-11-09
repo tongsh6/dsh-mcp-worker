@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { WorkerConfig } from './config.js';
 import { CwdCapabilityStore } from './capability-store.js';
@@ -10,6 +11,8 @@ import type {
   QueuedReason,
   RunEvent,
   RunOutcome,
+  TaskEvidence,
+  TaskOutcome,
   TaskRecord,
   TaskResultPayload,
   TaskStatus,
@@ -17,6 +20,9 @@ import type {
   TaskSummary,
 } from './types.js';
 import { isTerminalStatus } from './types.js';
+import { extractEvidence } from './evidence.js';
+import { collectGitBaseline, collectGitEvidence } from './git-evidence.js';
+import { detectDecisionRequest } from './report-protocol.js';
 import {
   isSandboxAclFailure,
   sandboxAclFailureDetail,
@@ -84,9 +90,10 @@ export class TaskManager {
   private readonly queue: string[] = [];
   private readonly busySessions = new Set<string>();
   /** 每个运行中任务实际占用过的 session id 集合；任务结束前不释放任何别名。 */
-  private readonly sessionLocks = new Map<string, Set<string>>();
-  /** 运行期实际换号：旧 id → 最新 id，供已排队任务接续。 */
+  private readonly sessionLocks = new Map<string, Set<string>>();  /** 运行期实际换号：旧 id → 最新 id，供已排队任务接续。 */
   private readonly sessionAliases = new Map<string, string>();
+  /** 终态后的证据采集/落盘 Promise；status/result 会等待它完成，避免读到未写完的 evidence。 */
+  private readonly finalizing = new Map<string, Promise<void>>();
   private readonly activeByCwd = new Map<string, number>();
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly progressSinks = new Map<string, (progress: number, message?: string) => void>();
@@ -226,6 +233,7 @@ export class TaskManager {
         started_at: record.startedAt,
         ended_at: record.endedAt,
         error: record.error ?? null,
+        outcome: isTerminalStatus(record.status) ? this.resolveOutcome(record) : null,
       }));
   }
 
@@ -282,7 +290,11 @@ export class TaskManager {
     return removed;
   }
 
-  async status(taskId: string, options: { cursor?: number; waitMs?: number } = {}): Promise<TaskStatusPayload> {
+  async status(
+    taskId: string,
+    options: { cursor?: number; waitMs?: number; detail?: 'summary' | 'events' } = {},
+  ): Promise<TaskStatusPayload> {
+    await this.awaitFinalization(taskId);
     const record = this.mustGet(taskId);
     const cursor = Math.max(0, Math.trunc(options.cursor ?? 0));
     const waitMs = Math.max(0, Math.min(Math.trunc(options.waitMs ?? 0), this.options.config.statusWaitMaxMs));
@@ -349,17 +361,36 @@ export class TaskManager {
       selected.push(digest);
       payload = candidate;
     }
-    return payload;
+    const detail = options.detail ?? this.options.config.statusDetail;
+    const visible =
+      detail === 'events'
+        ? payload.events
+        : payload.events.filter(
+            (event) => event.type === 'status' && event.phase !== 'step_start' && event.phase !== 'step_end',
+          );
+    return {
+      ...payload,
+      events: visible,
+      outcome: isTerminalStatus(latest.status) ? this.resolveOutcome(latest) : null,
+      ...(detail === 'summary'
+        ? { last_text: (latest.finalText ?? lastAssistantText(latest))?.slice(0, 300) ?? null }
+        : {}),
+    };
   }
 
   async result(taskId: string): Promise<TaskResultPayload> {
     const record = this.mustGet(taskId);
+    await this.awaitFinalization(taskId);
     if (!isTerminalStatus(record.status)) {
       throw new WorkerError('task_not_finished', `任务尚未结束（当前 ${record.status}），请先用 dsh_status 轮询`);
     }
+    const evidence = await this.readEvidence(record.id);
     return {
       task_id: record.id,
       status: record.status,
+      outcome: this.resolveOutcome(record),
+      decision_request: record.decisionRequest ?? null,
+      evidence,
       output: record.finalText ?? null,
       error: record.error ?? null,
       exit_code: record.exitCode,
@@ -427,6 +458,12 @@ export class TaskManager {
     const record = this.tasks.get(taskId);
     if (!record) throw new WorkerError('task_not_found', `任务不存在（可能已过期清理）：${taskId}`);
     return record;
+  }
+
+  /** 等待终态证据采集完成（若正在进行）；失败不影响查询。 */
+  private async awaitFinalization(taskId: string): Promise<void> {
+    const pending = this.finalizing.get(taskId);
+    if (pending) await pending.catch(() => undefined);
   }
 
   private deriveQueuedReason(record: TaskRecord): QueuedReason | null {
@@ -525,6 +562,14 @@ export class TaskManager {
         detail: reason,
       });
       this.notify(taskId);
+    }
+
+    if (config.evidenceGit) {
+      try {
+        record.gitBaseline = (await collectGitBaseline(record.cwd)) ?? undefined;
+      } catch {
+        // git 基线采集失败不阻塞任务
+      }
     }
 
     try {
@@ -636,7 +681,7 @@ export class TaskManager {
       if (remaining <= 0) this.activeByCwd.delete(cwdKey);
       else this.activeByCwd.set(cwdKey, remaining);
       this.progressSinks.delete(taskId);
-      await this.saveQuietly(record);
+      // 终态审计先于证据采集，保证 status 终态可见时审计已落盘
       this.audit({
         event: `task_${record.status}`,
         task_id: taskId,
@@ -645,8 +690,77 @@ export class TaskManager {
         permission_mode: record.permissionMode,
         ...(record.error ? { detail: record.error.slice(0, 500) } : {}),
       });
+      const finalize = (async () => {
+        await this.finalizeEvidence(record);
+        await this.saveQuietly(record);
+      })();
+      this.finalizing.set(taskId, finalize);
+      try {
+        await finalize;
+      } finally {
+        this.finalizing.delete(taskId);
+      }
       this.notify(taskId);
       this.pump();
+    }
+  }
+
+  /** 结果维度（outcome）：completed / needs_decision / failed / cancelled。 */
+  private resolveOutcome(record: TaskRecord): TaskOutcome {
+    if (record.outcome) return record.outcome;
+    if (record.status === 'cancelled') return 'cancelled';
+    if (record.status === 'failed') return 'failed';
+    if (record.status === 'succeeded') return detectDecisionRequest(record.finalText ?? null).outcome;
+    return 'completed';
+  }
+
+  /** 读取 evidence.json（worker 重启后仍可用）；缺失返回 null。 */
+  private async readEvidence(taskId: string): Promise<TaskEvidence | null> {
+    try {
+      const raw = await readFile(join(this.options.config.tasksDir, taskId, 'evidence.json'), 'utf8');
+      return JSON.parse(raw) as TaskEvidence;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 任务终态证据采集：outcome/decision_request + 命令/编辑/git 证据。
+   * 任何失败都不影响任务状态（证据是可选的验收辅助）。
+   */
+  private async finalizeEvidence(record: TaskRecord): Promise<void> {
+    if (record.status === 'cancelled') record.outcome = 'cancelled';
+    else if (record.status === 'failed') record.outcome = 'failed';
+    else if (record.status === 'succeeded') {
+      const detection = detectDecisionRequest(record.finalText ?? null);
+      record.outcome = detection.outcome;
+      record.decisionRequest = detection.decisionRequest ?? undefined;
+      if (detection.outcome === 'needs_decision') {
+        this.audit({
+          event: 'task_needs_decision',
+          task_id: record.id,
+          cwd: record.originalCwd ?? record.cwd,
+          session_id: record.sessionId,
+          detail: (detection.decisionRequest ?? '').slice(0, 500),
+        });
+      }
+    }
+
+    if (!this.options.config.evidenceGit && record.events.length === 0) return;
+    try {
+      const extracted = extractEvidence(record.events);
+      const dir = record.worktree?.path ?? record.cwd;
+      const taskDir = join(this.options.config.tasksDir, record.id);
+      const git = this.options.config.evidenceGit
+        ? await collectGitEvidence(dir, record.gitBaseline ?? null, taskDir)
+        : null;
+      const evidence: TaskEvidence = { ...extracted, git };
+      await mkdir(taskDir, { recursive: true });
+      await writeFile(join(taskDir, 'evidence.json'), JSON.stringify(evidence, null, 2), 'utf8');
+      record.evidenceCollected = true;
+      record.evidenceStats = { commands_failed: evidence.summary.commands_failed, has_git: Boolean(git) };
+    } catch {
+      // 证据采集失败不影响任务结果
     }
   }
 

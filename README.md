@@ -8,7 +8,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 单元测试 | ✅ 127/127 通过（`pnpm test`） |
+| 单元测试 | ✅ 161/161 通过（`pnpm test`） |
 | 真实链路烟测 | ✅ MCP Client → worker → 真实 DSH：问答 + 写文件（`hello-dsh.txt`）全链路通过 |
 | 长驻后端（M1） | ✅ 默认 `backend=sdk`：真实烟测首任务 9s（含一次初始化）、第二任务 **3s**；大仓库真实任务 18.4s（含 initialize）；`headless` 保留为 fallback |
 | 远程传输（M2a） | ✅ `DSH_MCP_TRANSPORT=http`：真实 HTTP 冒烟通过（`/healthz` 200、无 token 401、MCP HTTP 客户端跑真实任务 8s） |
@@ -21,7 +21,8 @@
 | 执行记录分析（v0.6.5） | ✅ 分析 11-02~11-09 的 64 个任务/200 条审计：修复「长任务被空闲回收误杀」（11 分钟任务、13.3M token 沉没）与「read-only 任务被 ACL 文本误判 failed」；新增 `dsh_status` 实时 `tokens/steps/tool_calls`、`dsh_result.partial_output/failure_kind`、token 预算护栏 `DSH_MCP_MAX_TASK_TOKENS`、ACL 失败 cwd 缓存（报告见 `D:\work\tmp\dsh-record-analysis\DSH-MCP执行记录分析-2026-11-09.md`） |
 | 续聊恢复（v0.6.3） | ✅ DSH SDK 协议无 resume；worker 重建后用旧 `session_id` 续聊会报 `session "..." already exists`。worker 自动换新 session id 重试，并把上一轮任务/结果摘要作为「续聊上下文」拼入；真实两进程验证：A 建 session → B 续聊 succeeded（output=ok2），事件含 `session_resume_fallback` |
 | 易用性升级（v0.7.0） | ✅ `auto` 模式 + cwd 能力缓存（跨进程，避免每次撞 ACL）+ 自动 worktree（受限仓库改到可写 worktree）+ 能力缓存 TTL 可调 + 瞬态失败自动重试 + 失败诊断 + `dsh_run(wait_s)` 单调用等待 + MCP 调用/字节指标 + 任务完成 webhook/命令通知 |
-| 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
+| 性能与协议（v0.8.0） | ✅ `dsh_status` 有界事件摘要（单条 ≤2KiB、单次 ≤16KiB，可配）、`session_id` 实时回填与别名锁、事件追加串行化（避免并发写坏 JSONL）、auto 模式优先 worktree |
+| 结构化证据（v0.9.0） | ✅ `dsh_result.evidence`（命令+退出码/编辑/git 变更+diff）与 `outcome`（completed/needs_decision/failed/cancelled）；`[DSH:NEEDS_DECISION]` 决策协议；`dsh_status` 默认 `detail=summary`；`dsh_read_result(source=diff|evidence)`；`dsh_metrics.outcomes/rework/evidence` || 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
 | cwd 安全校验 | ✅ 传用户主目录会被拒绝（Windows ACL 沙箱限制） |
 | Claude Code 接入 | ✅ 已注册（user scope）并实测连通：`claude mcp get dsh` → `√ Connected`；`claude -p` 真实调用 `dsh_describe` 成功 |
 | Codex 接入 | ✅ 已写入 `~/.codex/config.toml`，`codex mcp get dsh` 解析正常（工具白名单/超时/审批模式生效；未做真实调用） |
@@ -55,7 +56,7 @@ dsh-mcp-worker（本进程）
 cd C:\path\to\dsh-mcp-worker
 pnpm install
 pnpm build
-pnpm test          # 127 个单测
+pnpm test          # 161 个单测
 pnpm smoke         # 真实 DSH 集成烟测（约 30–60s）
 ```
 
@@ -183,12 +184,12 @@ ChatGPT web 只接受**远程 MCP**（Streamable HTTP / SSE），不接受 stdio
 | 工具 | 作用 | 关键参数 |
 |---|---|---|
 | `dsh_run` | 提交任务，**立即**返回 `task_id` | `task`（必填）、`cwd`（必填，项目目录）、`session_id?`、`permission_mode?`、`timeout_s?` |
-| `dsh_status` | 查状态 + 紧凑增量事件摘要（单条 ≤2KiB、单次 ≤16KiB；原始事件仍完整落盘，可用 `dsh_read_result(source=events)` 读取），支持长轮询 | `task_id`、`cursor?`、`wait_s?`（0–25） |
-| `dsh_result` | 取最终结果（输出过大自动落盘） | `task_id` |
+| `dsh_status` | 查状态 + 有界事件摘要；默认 `detail=summary` 只回状态/异常事件 + `last_text`，`detail=events` 回全部事件；终态带 `outcome` | `task_id`、`cursor?`、`wait_s?`、`detail?`（summary/events） |
+| `dsh_result` | 取最终结果；验收优先看 `evidence`（命令退出码/变更文件/diff 摘要）与 `outcome`，`output` 是 DSH 叙述 | `task_id` |
 | `dsh_cancel` | 取消任务（杀进程树） | `task_id` |
 | `dsh_tasks` | 列出最近任务摘要（回顾/继续轮询） | `limit?`（1–100）、`status?` |
 | `dsh_audit` | 读取审计事件（任务生命周期/审批决定） | `limit?`（1–200） |
-| `dsh_read_result` | 分页读取落盘的完整结果或事件日志 | `task_id`、`source?`（result/events）、`offset?`、`max_chars?` |
+| `dsh_read_result` | 分页读取落盘产物 | `task_id`、`source?`（result/events/diff/evidence）、`offset?`、`max_chars?` |
 | `dsh_batch_run` | 批量并行派发（每项可带 cwd/session/权限） | `tasks[]`（1–`maxBatchTasks`） |
 | `dsh_batch_status` | 批量聚合状态（整体状态 + 子任务 + 计数） | `batch_id`、`wait_s?` |
 | `dsh_batch_result` | 批量聚合结果（输出/错误/耗时） | `batch_id`、`max_output_chars?` |
@@ -308,7 +309,9 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_MAX_RESULT_CHARS` | `40000` | 结果超长时落盘阈值 |
 | `DSH_MCP_MAX_STATUS_EVENTS` | `100` | 单次 `dsh_status` 最多返回多少条事件（仍受字节预算限制） |
 | `DSH_MCP_MAX_STATUS_PAYLOAD_BYTES` | `16384` | 单次 `dsh_status` 结构化载荷（JSON）的 UTF-8 字节上限；超出时只返回能放下的摘要并标记 `events_truncated` |
-| `DSH_MCP_TASKS_DIR` | `$DSH_HOME/mcp-tasks` | 任务落盘根目录 |
+| `DSH_MCP_EVIDENCE_GIT` | `1` | 是否采集 git 证据（status/diff 摘要 + diff.patch）；置 0 关闭 |
+| `DSH_MCP_REPORT_PROTOCOL` | `1` | 是否向任务文本注入 `[DSH:NEEDS_DECISION]` 汇报协议页脚 |
+| `DSH_MCP_STATUS_DETAIL` | `summary` | `dsh_status` 默认 detail；置 `events` 回退到旧行为 || `DSH_MCP_TASKS_DIR` | `$DSH_HOME/mcp-tasks` | 任务落盘根目录 |
 | `DSH_HOME` | `~/.dsh` | DSH 状态目录（会透传给子进程） |
 
 权限模式说明（DSH 侧行为）：
@@ -399,7 +402,9 @@ src/
   approval.ts      审批阻断检测（供 dsh_result 的审批桥使用）
   audit.ts         append-only 审计日志（JSONL）
   artifacts.ts     任务产物的安全分页读取（dsh_read_result）
-  batch-manager.ts 批量任务（fan-out）：创建、聚合状态/结果、取消
+  evidence.ts      从事件提取结构化证据：命令退出码/标记/编辑聚合（预算内）
+  git-evidence.ts  git 基线/变更文件/diff.patch 采集（超时与失败不影响任务）
+  report-protocol.ts 汇报协议页脚注入 + [DSH:NEEDS_DECISION] 检测  batch-manager.ts 批量任务（fan-out）：创建、聚合状态/结果、取消
   search.ts        历史任务内容检索（输出 + 工具结果）
   otel.ts          轻量 OTLP/HTTP span 导出（无 SDK 依赖）
   usage.ts         DSH token 用量提取/累加（headless step_end 与 sdk assistant/message）
@@ -409,7 +414,7 @@ src/
   keyed-lock.ts    session 级串行锁
   config.ts        环境变量、DSH 入口探测、cwd 校验
   store.ts         meta.json / events.jsonl 落盘
-test/              127 个单测 + 真实 DSH 烟测（`test/mcp-smoke.ts`、`test/http-smoke.ts`）
+test/              161 个单测 + 真实 DSH 烟测（`test/mcp-smoke.ts`、`test/http-smoke.ts`）
 examples/          多端接入示例（Claude / Codex / MCPB / 远程接入）
 scripts/           部署与运维：deploy.ps1（源码→运行目录）/ patch-dsh-pwsh-encoding / patch-dsh-output-decoding / measure-goals / leader-usage
 docs/              measurement.md（目标口径/公式/A/B 协议/局限）、delegation-playbook.md（委派粒度与任务模板）
@@ -453,6 +458,10 @@ pnpm build         # tsc 产物到 dist/
 > 注意：npm Trusted Publisher 要求使用较新的 npm CLI（workflow 里用 Node 24），且 workflow 文件名必须与配置一致。
 
 License：MIT（见 [LICENSE](LICENSE)）。
+14. **退出码来自文本标记**：`[exit code: N]` / `[killed by signal]` / `[timed out]` / `[sandbox: ...]` 由 worker 从工具输出解析；DSH 若改格式，`exit_code` 会退化为 `null` 并保留 `markers` 原文，不会给错值。
+15. **git 证据的 pre_existing 是文件级**：只能标记「任务开始前已脏」的文件，无法区分同一文件里任务前后各自的改动行。
+16. **决策协议依赖 DSH 遵守标记**：`[DSH:NEEDS_DECISION]` 由模型按页脚输出；不遵守时退化为 `completed` + 叙述，不做启发式猜测；可用 `dsh_metrics.outcomes` 观察遵守率。
+17. **`dsh_status` 默认 detail 变更（v0.9.0）**：默认不再回传 tool_call/tool_result/text 事件；需要旧行为时传 `detail=events` 或设 `DSH_MCP_STATUS_DETAIL=events`。
 ## 路线图
 
 - **M1 ✅ 已完成（2026-11-02）**：长驻 `dsh --profile sdk` 后端（默认），一次 initialize 后每任务只发 prompt；保留 `headless` fallback。

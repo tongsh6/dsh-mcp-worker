@@ -7,7 +7,7 @@ const MAX_READ_CHARS = 100_000;
 
 export interface ArtifactReadResult {
   task_id: string;
-  source: 'result' | 'events';
+  source: 'result' | 'events' | 'diff' | 'evidence';
   file: string;
   content: string;
   offset: number;
@@ -16,21 +16,28 @@ export interface ArtifactReadResult {
   eof: boolean;
 }
 
+const SOURCE_FILES: Record<ArtifactReadResult['source'], string> = {
+  result: 'result.txt',
+  events: 'events.jsonl',
+  diff: 'diff.patch',
+  evidence: 'evidence.json',
+};
+
 /**
- * 分页读取任务落盘产物（result.txt / events.jsonl）。
+ * 分页读取任务落盘产物（result.txt / events.jsonl / diff.patch / evidence.json）。
  * 仅允许 tasksDir 下的合法 task_id，避免路径穿越。
  */
 export async function readTaskArtifact(
   tasksDir: string,
   taskId: string,
-  source: 'result' | 'events',
+  source: ArtifactReadResult['source'] = 'result',
   offset = 0,
   maxChars = 20_000,
 ): Promise<ArtifactReadResult> {
   if (!TASK_ID_PATTERN.test(taskId)) {
     throw new WorkerError('bad_request', `非法 task_id：${taskId}`);
   }
-  const fileName = source === 'events' ? 'events.jsonl' : 'result.txt';
+  const fileName = SOURCE_FILES[source] ?? 'result.txt';
   const file = join(tasksDir, taskId, fileName);
   let raw: string;
   try {

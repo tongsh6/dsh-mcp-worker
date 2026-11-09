@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcp-worker",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "把本机 DSH（DeepSeek Harness）暴露为 MCP worker，供 Claude Code / Codex / ChatGPT 等 leader 调用",
   "type": "module",
   "bin": {

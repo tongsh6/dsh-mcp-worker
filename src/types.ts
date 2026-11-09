@@ -41,6 +41,54 @@ export interface SandboxFallback {
   reason: string;
 }
 
+/** 任务结果的正交维度（不改变 TaskStatus）。 */
+export type TaskOutcome = 'completed' | 'needs_decision' | 'failed' | 'cancelled';
+
+export interface CommandEvidence {
+  seq: number;
+  tool: string;
+  command: string;
+  command_truncated?: boolean;
+  workdir?: string;
+  exit_code: number | null;
+  is_error: boolean;
+  markers: string[];
+  output_tail?: string;
+}
+
+export interface EditEvidence {
+  path: string;
+  ops: { create?: number; str_replace?: number; insert?: number };
+  errors: number;
+}
+
+export interface GitEvidence {
+  dir: string;
+  head: string | null;
+  branch: string | null;
+  files: Array<{ path: string; status: string; pre_existing: boolean }>;
+  files_truncated?: boolean;
+  diff_stat: string;
+  summary: { files_changed: number; insertions: number; deletions: number; untracked: number } | null;
+  pre_existing_dirty: boolean;
+  patch_path: string | null;
+  patch_truncated?: boolean;
+  error?: string;
+}
+
+export interface TaskEvidence {
+  commands: CommandEvidence[];
+  commands_truncated?: boolean;
+  commands_total: number;
+  edits: EditEvidence[];
+  git: GitEvidence | null;
+  summary: {
+    commands_failed: number;
+    last_command_exit_code: number | null;
+    edits_failed: number;
+  };
+}
+
 /** 任务记录：内存态与落盘 meta 的共同结构（落盘时不含 events）。 */
 export interface TaskRecord {
   id: string;
@@ -78,6 +126,16 @@ export interface TaskRecord {
   originalCwd?: string;
   /** 创建该任务的 worker 进程 PID；多 worker 共享任务目录时用于判断任务是否仍被其他活进程执行。 */
   workerPid?: number;
+  /** 任务开始前 git 工作树的脏文件基线（porcelain 行）。 */
+  gitBaseline?: string[];
+  /** 结果维度（completed / needs_decision / failed / cancelled）。 */
+  outcome?: TaskOutcome;
+  /** outcome=needs_decision 时 DSH 给出的问题清单。 */
+  decisionRequest?: string;
+  /** 是否已采集并落盘 evidence.json。 */
+  evidenceCollected?: boolean;
+  /** 证据摘要统计（用于 dsh_metrics，避免每次读文件）。 */
+  evidenceStats?: { commands_failed: number; has_git: boolean };
   events: RunEvent[];
 }
 
@@ -107,6 +165,10 @@ export interface TaskStatusPayload {
   steps?: number;
   /** 已发起的工具调用数。 */
   tool_calls?: number;
+  /** 终态时的结果维度；运行中为 null。 */
+  outcome?: TaskOutcome | null;
+  /** detail=summary 时附带的最后一条 assistant 文本摘要（≤ 300 字节）。 */
+  last_text?: string | null;
 }
 
 /** `dsh_result` 的返回结构。 */
@@ -134,6 +196,12 @@ export interface TaskResultPayload {
     last_error: string | null;
     suggestion: string;
   } | null;
+  /** 结果维度：completed / needs_decision / failed / cancelled（与 status 正交）。 */
+  outcome: TaskOutcome;
+  /** outcome=needs_decision 时 DSH 给出的问题清单（≤ 4 KiB）。 */
+  decision_request: string | null;
+  /** 从事件提取的结构化证据（命令退出码/编辑/git 变更）；未采集时为 null。 */
+  evidence: TaskEvidence | null;
   /** 因 ACL 受限自动切换到的可写 worktree（leader 可去该路径审查/合入）。 */
   worktree?: { path: string; branch: string } | null;
   /** 瞬态失败自动重试次数。 */
@@ -159,6 +227,8 @@ export interface TaskSummary {
   started_at?: number;
   ended_at?: number;
   error?: string | null;
+  /** 结果维度（终态时给出）。 */
+  outcome?: TaskOutcome | null;
 }
 
 /** 审计日志条目（append-only JSONL）。 */

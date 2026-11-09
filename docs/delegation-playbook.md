@@ -150,3 +150,16 @@ Codex 桌面/CLI 自带 multi-agent（`spawn_agent` / `wait_agent` / `followup_t
 - 任务里写清 `[已定决策]`（DSH 不得改变）与 `[待你判断]`（遇到分支停下汇报）。
 
 验收只看四样：变更文件、测试结果、风险点、需要 Astra 决策的点。
+---
+
+## 10. 结构化证据与决策协议（v0.9.0）
+
+验收优先看事实，不看叙述：
+
+- `dsh_result.evidence.commands`：命令、退出码、原样标记（exit code / killed / timed out / sandbox denied）；
+- `dsh_result.evidence.git`：变更文件（`pre_existing` 标记任务前已脏）、diff 统计、`patch_path`；完整 diff 用 `dsh_read_result(source=diff)`；
+- `dsh_result.outcome`：`completed` / `needs_decision` / `failed` / `cancelled`（与 `status` 正交）。
+
+`outcome=needs_decision` 时：用返回的 `decision_request` 回答，并带上原 `session_id` 续聊；不要把决策请求当失败，也不要猜。
+
+`dsh_status` 默认 `detail=summary`（只回状态/异常事件 + `last_text`）；排查过程时传 `detail=events`，或设 `DSH_MCP_STATUS_DETAIL=events` 回退旧行为。

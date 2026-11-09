@@ -254,13 +254,28 @@ export class SdkBackend {
     }
 
     if (event.type === 'tool/call') {
-      const data = event.data as { call?: { name?: string; tool?: string } } | undefined;
-      state.onEvent({ type: 'tool_call', tool: data?.call?.name ?? data?.call?.tool ?? 'unknown' });
+      const data = event.data as
+        | { callId?: string; name?: string; arguments?: unknown; call?: { name?: string; tool?: string; callId?: string; arguments?: unknown } }
+        | undefined;
+      const name = data?.name ?? data?.call?.name ?? data?.call?.tool ?? 'unknown';
+      const callId = data?.callId ?? data?.call?.callId;
+      state.onEvent({
+        type: 'tool_call',
+        tool: name,
+        ...(callId ? { call_id: callId } : {}),
+        arguments: boundedToolArguments(data?.arguments ?? data?.call?.arguments),
+      });
       return;
     }
 
     if (event.type === 'tool/result') {
-      state.onEvent({ type: 'tool_result', message: (event.data as { message?: unknown } | undefined)?.message ?? null });
+      const data = event.data as { message?: { toolCallId?: string } } | undefined;
+      const callId = data?.message?.toolCallId;
+      state.onEvent({
+        type: 'tool_result',
+        ...(callId ? { call_id: callId } : {}),
+        message: data?.message ?? null,
+      });
       return;
     }
 
@@ -332,6 +347,16 @@ export class SdkBackend {
 }
 
 /** turn/end 的 reason 在新版 session 事件里是 `{ kind }` 对象，老格式可能是字符串。 */
+/** 工具参数落盘预算：字符串字段截到 2 KiB，避免大参数撑爆事件文件。 */
+function boundedToolArguments(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = typeof item === 'string' && item.length > 2_048 ? `${item.slice(0, 2_048)}…` : item;
+  }
+  return output;
+}
+
 function normalizeTurnEndReason(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value !== null && typeof value === 'object' && typeof (value as { kind?: unknown }).kind === 'string') {

@@ -102,4 +102,20 @@ describe('SdkBackend（假 SDK 运行时）', () => {
     expect(outcome.timedOut).toBe(true);
     expect(backend.isClosed).toBe(true);
   });
+
+  it('sdk 工具事件映射：tool/name/arguments/call_id 正确（回归 tool=unknown）', async () => {
+    const { cwd, env } = await makeEnv();
+    const backend = await SdkBackend.start(backendOptions(env, cwd));
+    const events: Array<Record<string, unknown>> = [];
+    await backend.prompt('s1', 'TOOLS', (event) => events.push(event as Record<string, unknown>), 5_000);
+    const call = events.find((event) => event.type === 'tool_call' && event.tool === 'pwsh');
+    expect(call).toBeTruthy();
+    expect(call?.call_id).toBe('c1');
+    expect((call?.arguments as { command?: string } | undefined)?.command).toContain('exit 3');
+    const result = events.find((event) => event.type === 'tool_result' && event.call_id === 'c1');
+    expect(result).toBeTruthy();
+    expect(events.some((event) => event.type === 'tool_call' && event.tool === 'str_replace_editor')).toBe(true);
+    expect(events.some((event) => event.tool === 'unknown')).toBe(false);
+    await backend.shutdown();
+  });
 });

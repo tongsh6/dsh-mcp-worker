@@ -10,6 +10,7 @@ import { PERMISSION_MODES, validateCwd, type WorkerConfig } from './config.js';
 import { WorkerError } from './errors.js';
 import { EVENT_SUMMARY_MAX_BYTES, summarizeEvent, utf8ByteLength } from './event-summary.js';
 import { boundText } from './output.js';
+import { injectReportProtocol } from './report-protocol.js';
 import { searchTasks } from './search.js';
 import type { TaskManager } from './task-manager.js';
 import type { RunEvent, TaskRecord, TaskStatus } from './types.js';
@@ -22,14 +23,14 @@ const INSTRUCTIONS = [
   'DSH（DeepSeek Harness）worker：把可验收的完整工作单元交给本机 DSH 执行，并返回结果。',
   '粒度原则（最重要）：一个 dsh_run = 一个可独立验收的工作单元，默认包含「定位 → 实现/修改 → 自测 → 证据汇总」。典型粒度：一个功能点、一个 bug、一个测试修复批次、一次跨文件重构。禁止把同一工作拆成逐文件/逐命令/逐步骤的微任务——那会让 leader 付出更多思考与往返 token，反而更慢。',
   '分工原则：leader 负责决策与验收，DSH 负责执行与迭代；执行密集（读代码/改文件/跑测试/机械重构/批量核对）交给 DSH，需要业务语义/方案权衡/根因判断时 leader 先决策再外包。任务建议写 [已定决策] 与 [待你判断]，DSH 遇到需决策的分支应停下汇报，不要猜。',
-  '任务文本四要素：目标（做什么、为什么）、范围（可改/不可改、入口文件）、验收（要跑的命令与期望结果，失败附输出）、证据（变更文件清单 + 测试结果 + 风险点）。给目标与约束，不要让 DSH 逐步等你确认；DSH 会自己规划多步工具调用。',
+  '任务文本四要素：目标（做什么、为什么）、范围（可改/不可改、入口文件可选——不知道就不写）、验收（要跑的命令与期望结果，失败附输出）、证据（变更文件清单 + 测试结果 + 风险点）。给目标与约束，不要让 DSH 逐步等你确认；DSH 会自己规划多步工具调用。',
   '使用顺序：1) dsh_run 提交（可带 wait_s=60–120 在本次调用里直接等结果）；2) dsh_status(task_id, wait_s=长轮询，建议 60–120s) 等到终态；3) dsh_result 取结果；中断用 dsh_cancel。不要 5–25 秒高频轮询，也不要在 DSH 执行期间重复做同一件事。',
   'cwd 必须是具体项目目录绝对路径（不要用用户主目录；Windows 沙箱下 shell 可能不可用）。',
   'permission_mode：默认 auto（worker 按 cwd 能力自动选 workspace-write / worktree / read-only / danger-full-access，调用方不需要手选）；也可显式传 read-only / workspace-write / danger-full-access。',
   '并行：彼此独立的工作流用一次 dsh_batch_run 派发（每个任务仍各自包含完整验收），不要拆成串行小任务。',
   '续聊：同一工作单元后续修正把首次返回的 session_id 传回 dsh_run，不要新建多个孤立任务。',
-  '验收：leader 只审阅 diff/测试证据/风险点并决定是否返工，不要逐步重做 DSH 已完成的工作；DSH 失败时把 error 原样反馈用户。',
-  '历史任务用 dsh_tasks 回顾；审计事件用 dsh_audit；dsh_result 输出过长落盘时用 dsh_read_result 分页读取；运行指标用 dsh_metrics。',
+  '验收：leader 只审阅结构化事实并决定是否返工——优先看 dsh_result 的 evidence（命令退出码/变更文件/git diff 摘要）与 outcome；outcome=needs_decision 时用原 session_id 回答；output 是 DSH 的叙述，不作为唯一依据。不要逐步重做 DSH 已完成的工作；DSH 失败时把 error 原样反馈用户。',
+  '历史任务用 dsh_tasks 回顾；审计事件用 dsh_audit；dsh_result 输出过长落盘时用 dsh_read_result 分页读取（source=result/events/diff/evidence）；运行指标用 dsh_metrics。',
   '长任务依赖异步任务模型：不要在一次工具调用里反复短轮询等待。',
 ].join('\n');
 
@@ -77,7 +78,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         .string()
         .min(1)
         .describe(
-          '完整工作单元描述，建议包含：目标、[已定决策]、[待你判断]、范围（可改/不可改、入口文件）、验收命令与期望、证据要求（变更文件+测试结果+风险）；给目标与约束，不要写逐步操作清单',
+          '完整工作单元描述，建议包含：目标、[已定决策]、[待你判断]、[入口]（可选）、范围（可改/不可改）、验收命令与期望、证据要求；给目标与约束，不要写逐步操作清单',
         ),
       cwd: z.string().optional().describe('任务执行目录（绝对路径）；缺省依次用 DSH_MCP_DEFAULT_CWD、worker 进程 cwd'),
       session_id: z.string().optional().describe('续聊已有 DSH 会话时传入；同一 session 的任务串行执行'),
@@ -102,7 +103,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         const progressToken = extra._meta?.progressToken;
         const record = await manager.create(
           {
-            task: args.task,
+            task: config.reportProtocol ? injectReportProtocol(args.task) : args.task,
             cwd,
             sessionId: args.session_id,
             permissionMode: args.permission_mode,
@@ -148,6 +149,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
           ...created,
           session_id: status.session_id ?? created.session_id ?? null,
           status: status.status,
+          outcome: status.outcome ?? null,
           waited_s: args.wait_s,
           finished: isTerminal(status.status),
           phase: status.phase,
@@ -172,7 +174,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
     description:
       `查询任务状态与增量事件摘要（单条事件 ≤ ${EVENT_SUMMARY_MAX_BYTES / 1024}KiB，单次载荷 ≤ ${Math.round(
         config.maxStatusPayloadBytes / 1024,
-      )}KiB）；完整原始事件仍会落盘，用 dsh_read_result(source=events) 分页读取。status 为 succeeded/failed/cancelled 表示结束。用 wait_s 长轮询（建议 60–120s）一次等更久，减少 leader 往返；不要用 5–25s 高频轮询。`,
+      )}KiB）；完整原始事件仍会落盘，用 dsh_read_result(source=events) 分页读取。默认 detail=summary 只返回状态/异常事件与 last_text（省 leader 上下文）；排查 worker 行为时用 detail=events。status 为 succeeded/failed/cancelled 表示结束，outcome 给出 completed/needs_decision/failed/cancelled。用 wait_s 长轮询（建议 60–120s）一次等更久，减少 leader 往返；不要用 5–25s 高频轮询。`,
     inputSchema: {
       task_id: z.string().min(1).describe('dsh_run 返回的任务 id'),
       cursor: z.number().int().min(0).optional().describe('上次返回的 next_cursor，用于只取增量事件'),
@@ -184,6 +186,10 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         .describe(
           `长轮询等待秒数（默认 0）；实际上限由 worker 配置 DSH_MCP_STATUS_WAIT_MAX_S 决定（当前 ${Math.round(config.statusWaitMaxMs / 1_000)}s）`,
         ),
+      detail: z
+        .enum(['summary', 'events'])
+        .optional()
+        .describe('summary=仅状态与异常事件（默认，省 leader 上下文）；events=返回全部工具/文本事件（排查用）'),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
     handler: async (args) => {
@@ -191,6 +197,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         const payload = await manager.status(args.task_id, {
           cursor: args.cursor,
           waitMs: (args.wait_s ?? 0) * 1_000,
+          detail: args.detail,
         });
         return ok({ ...payload });
       } catch (error) {
@@ -202,7 +209,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
   registerTool(server, 'dsh_result', {
     title: '获取 DSH 任务结果',
     description:
-      '任务结束后获取最终结果（含完整输出、退出码、耗时）。输出过大时会自动落盘并返回文件路径。任务未结束时返回错误。',
+      '任务结束后获取最终结果。验收优先看 `evidence`（命令退出码、变更文件、git diff 摘要）与 `outcome`（completed/needs_decision/failed/cancelled）；`output` 是 DSH 的叙述。输出过大时会自动落盘并返回文件路径。任务未结束时返回错误。',
     inputSchema: {
       task_id: z.string().min(1).describe('dsh_run 返回的任务 id'),
     },
@@ -313,6 +320,9 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
             max_status_events: config.maxStatusEvents,
             max_status_payload_bytes: config.maxStatusPayloadBytes,
             max_event_summary_bytes: EVENT_SUMMARY_MAX_BYTES,
+            evidence_git: config.evidenceGit,
+            report_protocol: config.reportProtocol,
+            status_detail: config.statusDetail,
             task_ttl_min: Math.round(config.taskTtlMs / 60_000),
             max_tasks: config.maxTasks,
             cleanup_interval_min: Math.round(config.cleanupIntervalMs / 60_000),
@@ -379,10 +389,13 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
   registerTool(server, 'dsh_read_result', {
     title: '读取任务完整产物',
     description:
-      '当 dsh_result 因输出过长落盘（返回 artifacts）时，用本工具分页读取完整结果或事件日志；仅限任务目录内。',
+      '分页读取任务落盘产物：result=最终结果（超长落盘时）、events=完整事件流、diff=git.patch、evidence=结构化证据 JSON。仅限任务目录内。',
     inputSchema: {
       task_id: z.string().min(1).describe('任务 id'),
-      source: z.enum(['result', 'events']).optional().describe('result=最终结果落盘文件；events=事件流 JSONL；默认 result'),
+      source: z
+        .enum(['result', 'events', 'diff', 'evidence'])
+        .optional()
+        .describe('result=最终结果；events=事件流 JSONL；diff=完整 diff.patch；evidence=结构化证据 JSON；默认 result'),
       offset: z.number().int().min(0).optional().describe('字符偏移，默认 0'),
       max_chars: z.number().int().min(100).max(100_000).optional().describe('本次最多返回字符数，默认 20000'),
     },
@@ -433,7 +446,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
           timeout_s?: number;
         }>;
         const inputs = taskInputs.map((item) => ({
-          task: item.task,
+          task: config.reportProtocol ? injectReportProtocol(item.task) : item.task,
           cwd: validateCwd(item.cwd ?? config.defaultCwd ?? process.cwd(), config),
           sessionId: item.session_id,
           permissionMode: item.permission_mode,
@@ -560,10 +573,30 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         }
         const sorted = durations.sort((a, b) => a - b);
         const avg = sorted.length > 0 ? Math.round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length) : null;
+        const outcomes = { completed: 0, needs_decision: 0, failed: 0, cancelled: 0 };
+        const sessionCounts = new Map<string, number>();
+        let tasksWithGit = 0;
+        let commandsFailedTotal = 0;
+        for (const task of tasks) {
+          if (task.sessionId) sessionCounts.set(task.sessionId, (sessionCounts.get(task.sessionId) ?? 0) + 1);
+          if (task.evidenceStats) {
+            commandsFailedTotal += task.evidenceStats.commands_failed;
+            if (task.evidenceStats.has_git) tasksWithGit += 1;
+          }
+          if (!isTerminal(task.status)) continue;
+          const outcome =
+            task.outcome ??
+            (task.status === 'failed' ? 'failed' : task.status === 'cancelled' ? 'cancelled' : 'completed');
+          outcomes[outcome] += 1;
+        }
+        const reworkSessions = [...sessionCounts.values()].filter((count) => count > 1).length;
         return ok({
           counts,
           total: tasks.length,
           tokens,
+          outcomes,
+          rework: { sessions_reentered: reworkSessions, tasks_total: tasks.length },
+          evidence: { tasks_with_git: tasksWithGit, commands_failed_total: commandsFailedTotal },
           mcp: snapshotMcpMetrics(mcpMetrics),
           latency_ms: {
             avg,

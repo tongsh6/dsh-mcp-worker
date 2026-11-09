@@ -104,6 +104,12 @@ export interface WorkerConfig {
   maxStatusEvents: number;
   /** dsh_status 单次结构化载荷（JSON）的 UTF-8 字节上限。 */
   maxStatusPayloadBytes: number;
+  /** 是否采集 git 证据（status/diff 摘要 + diff.patch）。 */
+  evidenceGit: boolean;
+  /** 是否向 dsh_run 任务文本注入汇报协议页脚。 */
+  reportProtocol: boolean;
+  /** dsh_status 默认 detail：summary（仅状态/异常）或 events（旧行为）。 */
+  statusDetail: 'summary' | 'events';
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
@@ -117,7 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
 
   return {
     name: 'dsh-mcp-worker',
-    version: '0.8.0',
+    version: '0.9.0',
     backend: env.DSH_MCP_BACKEND?.trim() === 'headless' ? 'headless' : 'sdk',
     transport: env.DSH_MCP_TRANSPORT?.trim() === 'http' ? 'http' : 'stdio',
     http: {
@@ -170,7 +176,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     maxResultChars: readInt(env, 'DSH_MCP_MAX_RESULT_CHARS', 40_000, 1_000, 1_000_000),
     maxStatusEvents: readInt(env, 'DSH_MCP_MAX_STATUS_EVENTS', 100, 1, 1_000),
     maxStatusPayloadBytes: readInt(env, 'DSH_MCP_MAX_STATUS_PAYLOAD_BYTES', 16_384, 4_096, 1_000_000),
+    evidenceGit: readBool(env, 'DSH_MCP_EVIDENCE_GIT', true),
+    reportProtocol: readBool(env, 'DSH_MCP_REPORT_PROTOCOL', true),
+    statusDetail: parseStatusDetail(env.DSH_MCP_STATUS_DETAIL),
   };
+}
+
+function parseStatusDetail(value: string | undefined): 'summary' | 'events' {
+  return value?.trim().toLowerCase() === 'events' ? 'events' : 'summary';
 }
 
 /** 探测本机 DSH 入口；优先级：显式 CLI 路径 > 显式命令 > 已知安装路径 > PATH 上的 dsh。 */

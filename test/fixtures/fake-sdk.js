@@ -40,6 +40,50 @@ rl.on('line', (line) => {
         event(sessionId, { type: 'turn/end', data: { reason: 'error' } });
         return;
       }
+      if (text.includes('TOOLS')) {
+        event(sessionId, {
+          type: 'tool/call',
+          data: { callId: 'c1', name: 'pwsh', arguments: { command: 'pwsh -c "Write-Output x; exit 3"', workdir: process.cwd() } },
+        });
+        event(sessionId, {
+          type: 'tool/result',
+          data: {
+            message: {
+              role: 'tool',
+              toolCallId: 'c1',
+              isError: false,
+              content: [{ type: 'text', text: 'x\n[exit code: 3]' }],
+            },
+          },
+        });
+        event(sessionId, {
+          type: 'tool/call',
+          data: { callId: 'c2', name: 'pwsh', arguments: { command: 'git status' } },
+        });
+        event(sessionId, {
+          type: 'tool/result',
+          data: { message: { role: 'tool', toolCallId: 'c2', isError: false, content: [{ type: 'text', text: 'clean' }] } },
+        });
+        event(sessionId, {
+          type: 'tool/call',
+          data: { callId: 'c3', name: 'str_replace_editor', arguments: { command: 'create', path: 'a.txt' } },
+        });
+        event(sessionId, {
+          type: 'tool/result',
+          data: { message: { role: 'tool', toolCallId: 'c3', isError: false, content: [{ type: 'text', text: 'created' }] } },
+        });
+      }
+      if (text.includes('DECIDE')) {
+        event(sessionId, {
+          type: 'assistant/message',
+          data: {
+            message: { content: [{ type: 'text', text: '问题：文件名用 A 还是 B？' }, { type: 'text', text: '[DSH:NEEDS_DECISION]\n文件名用 A 还是 B？' }] },
+            usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
+          },
+        });
+        event(sessionId, { type: 'turn/end', data: { reason: 'completed' } });
+        return;
+      }
       const messages = text.includes('MULTI') ? ['part-1', 'part-2'] : [`fake:${text}`];
       for (const content of messages) {
         event(sessionId, {

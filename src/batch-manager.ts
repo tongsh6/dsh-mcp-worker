@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { WorkerError } from './errors.js';
 import type { TaskCreateInput, TaskManager } from './task-manager.js';
-import type { TaskStatus } from './types.js';
+import type { TaskStatus, TaskOutcome } from './types.js';
 
 export interface BatchRecord {
   id: string;
@@ -19,6 +19,7 @@ export interface BatchChildStatus {
   phase: string;
   progress: number;
   error?: string | null;
+  outcome?: TaskOutcome | null;
 }
 
 export type BatchOverallStatus = 'queued' | 'running' | 'completed' | 'partial_failed' | 'all_failed' | 'cancelled';
@@ -28,6 +29,7 @@ export interface BatchStatusPayload {
   status: BatchOverallStatus;
   created_at: number;
   counts: Record<TaskStatus, number>;
+  outcomes: Record<TaskOutcome, number>;
   children: BatchChildStatus[];
 }
 
@@ -38,6 +40,7 @@ export interface BatchResultItem {
   error: string | null;
   wall_ms: number | null;
   events_count: number | null;
+  outcome?: TaskOutcome | null;
 }
 
 export interface BatchResultPayload {
@@ -89,6 +92,7 @@ export class BatchManager {
       status: aggregate(children),
       created_at: batch.createdAt,
       counts,
+      outcomes: countOutcomes(children.map((child) => child.outcome)),
       children,
     };
   }
@@ -108,6 +112,7 @@ export class BatchManager {
           error: '任务已被清理（超过 TTL 或数量上限）',
           wall_ms: null,
           events_count: null,
+          outcome: 'failed',
         });
         continue;
       }
@@ -122,6 +127,7 @@ export class BatchManager {
             error: result.error,
             wall_ms: result.usage.wall_ms,
             events_count: result.events_count,
+            outcome: result.outcome,
           });
           continue;
         } catch {
@@ -135,10 +141,15 @@ export class BatchManager {
         error: '任务尚未结束',
         wall_ms: null,
         events_count: null,
+        outcome: null,
       });
     }
     const children = batch.taskIds.map((taskId) => this.childStatus(taskId));
-    return { batch_id: batch.id, status: aggregate(children), results: items };
+    return {
+      batch_id: batch.id,
+      status: aggregate(children),
+      results: items,
+    };
   }
 
   async cancel(batchId: string): Promise<{ batch_id: string; cancelled: string[] }> {
@@ -177,6 +188,7 @@ export class BatchManager {
       phase: record.status === 'running' ? 'running' : record.status,
       progress: record.events.filter((event) => event.type === 'status' && event.phase === 'step_end').length,
       error: record.error ?? null,
+      outcome: isTerminal(record.status) ? (record.outcome ?? fallbackOutcome(record.status)) : null,
     };
   }
 
@@ -196,8 +208,23 @@ export class BatchManager {
   }
 }
 
-function aggregate(children: BatchChildStatus[]): BatchOverallStatus {
-  if (children.length === 0) return 'queued';
+function countOutcomes(outcomes: Array<TaskOutcome | null | undefined>): Record<TaskOutcome, number> {
+  const counts: Record<TaskOutcome, number> = { completed: 0, needs_decision: 0, failed: 0, cancelled: 0 };
+  for (const outcome of outcomes) {
+    if (outcome) counts[outcome] += 1;
+  }
+  return counts;
+}
+
+function isTerminal(status: TaskStatus): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+}
+
+function fallbackOutcome(status: TaskStatus): TaskOutcome {
+  return status === 'failed' ? 'failed' : status === 'cancelled' ? 'cancelled' : 'completed';
+}
+
+function aggregate(children: BatchChildStatus[]): BatchOverallStatus {  if (children.length === 0) return 'queued';
   const statuses = children.map((child) => child.status);
   const queued = statuses.filter((status) => status === 'queued').length;
   const running = statuses.filter((status) => status === 'running').length;

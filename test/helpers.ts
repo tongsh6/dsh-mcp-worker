@@ -144,6 +144,9 @@ export function makeTestConfig(overrides: Partial<WorkerConfig> = {}): WorkerCon
     maxResultChars: 1_000,
     maxStatusEvents: 50,
     maxStatusPayloadBytes: 16 * 1024,
+    evidenceGit: false,
+    reportProtocol: false,
+    statusDetail: 'events',
     ...overrides,
   };
 }
