@@ -55,7 +55,7 @@ dsh-mcp-worker（本进程）
 cd C:\path\to\dsh-mcp-worker
 pnpm install
 pnpm build
-pnpm test          # 103 个单测
+pnpm test          # 127 个单测
 pnpm smoke         # 真实 DSH 集成烟测（约 30–60s）
 ```
 
@@ -382,9 +382,9 @@ src/
   keyed-lock.ts    session 级串行锁
   config.ts        环境变量、DSH 入口探测、cwd 校验
   store.ts         meta.json / events.jsonl 落盘
-test/              103 个单测 + 真实 DSH 烟测（`test/mcp-smoke.ts`、`test/http-smoke.ts`）
+test/              127 个单测 + 真实 DSH 烟测（`test/mcp-smoke.ts`、`test/http-smoke.ts`）
 examples/          多端接入示例（Claude / Codex / MCPB / 远程接入）
-scripts/           运维与测量脚本：patch-dsh-pwsh-encoding / patch-dsh-output-decoding / measure-goals（A/B 达成率）/ leader-usage（leader 用量扫描）
+scripts/           部署与运维：deploy.ps1（源码→运行目录）/ patch-dsh-pwsh-encoding / patch-dsh-output-decoding / measure-goals / leader-usage
 docs/              measurement.md（目标口径/公式/A/B 协议/局限）、delegation-playbook.md（委派粒度与任务模板）
 ```
 
