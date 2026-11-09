@@ -102,6 +102,8 @@ export interface WorkerConfig {
   maxTaskTokens: number;
   maxResultChars: number;
   maxStatusEvents: number;
+  /** dsh_status 单次结构化载荷（JSON）的 UTF-8 字节上限。 */
+  maxStatusPayloadBytes: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
@@ -167,6 +169,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     maxTaskTokens: readInt(env, 'DSH_MCP_MAX_TASK_TOKENS', 0, 0, 1_000_000_000),
     maxResultChars: readInt(env, 'DSH_MCP_MAX_RESULT_CHARS', 40_000, 1_000, 1_000_000),
     maxStatusEvents: readInt(env, 'DSH_MCP_MAX_STATUS_EVENTS', 100, 1, 1_000),
+    maxStatusPayloadBytes: readInt(env, 'DSH_MCP_MAX_STATUS_PAYLOAD_BYTES', 16_384, 4_096, 1_000_000),
   };
 }
 

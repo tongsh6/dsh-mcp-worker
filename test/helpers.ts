@@ -143,6 +143,7 @@ export function makeTestConfig(overrides: Partial<WorkerConfig> = {}): WorkerCon
     otelServiceName: 'dsh-mcp-worker',
     maxResultChars: 1_000,
     maxStatusEvents: 50,
+    maxStatusPayloadBytes: 16 * 1024,
     ...overrides,
   };
 }

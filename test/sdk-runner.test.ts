@@ -107,5 +107,10 @@ describe('composedSdkRunner（M1 长驻后端）', () => {
     expect(
       events.some((event) => event.type === 'session' && String(event.sessionId ?? '').includes('resume')),
     ).toBe(true);
+    const actualSessionId = events
+      .filter((event) => event.type === 'session' && typeof event.sessionId === 'string')
+      .at(-1)?.sessionId as string;
+    expect(result.session_id).toBe(actualSessionId);
+    expect((await manager.status(record.id)).session_id).toBe(actualSessionId);
   });
 });

@@ -49,6 +49,8 @@ export interface TaskRecord {
   cwd: string;
   sessionId?: string;
   permissionMode: string;
+  /** 用户请求的权限模式（auto 或显式）；用于区分 cwd 能力缓存与执行策略。 */
+  requestedPermissionMode?: string;
   /** 本次任务允许的最长运行时间（毫秒）；缺省用配置默认值。 */
   timeoutMs?: number;
   createdAt: number;
@@ -86,11 +88,15 @@ export interface TaskStatusPayload {
   phase: string;
   progress: number;
   events: RunEvent[];
+  /** 本次 events 是否因条数/字节预算未返回全部增量；原始事件仍在 events.jsonl。 */
+  events_truncated?: boolean;
   next_cursor: number;
   created_at: number;
   started_at?: number;
   ended_at?: number;
   error?: string | null;
+  /** status.error 是否因 UTF-8 字节上限被截断（完整错误仍可通过 result/events 查看）。 */
+  error_truncated?: boolean;
   timed_out: boolean;
   session_id?: string;
   /** 仅 queued 状态给出：为什么还在排队。 */

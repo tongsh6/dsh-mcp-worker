@@ -8,10 +8,11 @@ import type { AuditLog } from './audit.js';
 import type { BatchManager } from './batch-manager.js';
 import { PERMISSION_MODES, validateCwd, type WorkerConfig } from './config.js';
 import { WorkerError } from './errors.js';
+import { EVENT_SUMMARY_MAX_BYTES, summarizeEvent, utf8ByteLength } from './event-summary.js';
 import { boundText } from './output.js';
 import { searchTasks } from './search.js';
 import type { TaskManager } from './task-manager.js';
-import type { TaskRecord, TaskStatus } from './types.js';
+import type { RunEvent, TaskRecord, TaskStatus } from './types.js';
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
@@ -128,16 +129,24 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         if (!args.wait_s || args.wait_s <= 0) return ok(created);
         const deadline = Date.now() + args.wait_s * 1_000;
         let status = await manager.status(record.id, { waitMs: args.wait_s * 1_000 });
+        let firstPage: typeof status | null = status.events.length > 0 ? status : null;
         while (!isTerminal(status.status) && Date.now() < deadline) {
           const remaining = deadline - Date.now();
           if (remaining <= 0) break;
           const next = await manager.status(record.id, { cursor: status.next_cursor, waitMs: remaining });
+          if (!firstPage && next.events.length > 0) firstPage = next;
           const noProgress = next.next_cursor === status.next_cursor && !isTerminal(next.status);
           status = next;
           if (noProgress) break; // 已等满，避免空转
         }
-        return ok({
+        // 终态那次轮询可能是空增量：run 返回等待期间第一页非空摘要，保持 events 与 next_cursor 对应。
+        const visible = firstPage ?? status;
+        const hint = isTerminal(status.status)
+          ? '任务已结束：用 dsh_result 取结果；完整原始事件用 dsh_read_result(source=events) 读取。'
+          : '仍在运行：用 dsh_status(cursor=next_cursor, wait_s=60~120) 继续等待。';
+        const runBase: Record<string, unknown> = {
           ...created,
+          session_id: status.session_id ?? created.session_id ?? null,
           status: status.status,
           waited_s: args.wait_s,
           finished: isTerminal(status.status),
@@ -146,12 +155,12 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
           tokens: status.tokens ?? null,
           steps: status.steps,
           tool_calls: status.tool_calls,
-          events: status.events,
-          next_cursor: status.next_cursor,
-          hint: isTerminal(status.status)
-            ? '任务已结束：用 dsh_result 取结果。'
-            : '仍在运行：用 dsh_status(cursor=next_cursor, wait_s=60~120) 继续等待。',
-        });
+          events: [] as RunEvent[],
+          events_truncated: visible.events_truncated ?? false,
+          next_cursor: Number(visible.events[0]?.seq ?? 0),
+          hint,
+        };
+        return ok(fitRunPayload(runBase, visible.events, config.maxStatusPayloadBytes));
       } catch (error) {
         return fail(error);
       }
@@ -161,7 +170,9 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
   registerTool(server, 'dsh_status', {
     title: '查询 DSH 任务状态',
     description:
-      '查询任务状态与增量事件。status 为 succeeded/failed/cancelled 表示结束。用 wait_s 长轮询（建议 60–120s）一次等更久，减少 leader 往返；不要用 5–25s 高频轮询。',
+      `查询任务状态与增量事件摘要（单条事件 ≤ ${EVENT_SUMMARY_MAX_BYTES / 1024}KiB，单次载荷 ≤ ${Math.round(
+        config.maxStatusPayloadBytes / 1024,
+      )}KiB）；完整原始事件仍会落盘，用 dsh_read_result(source=events) 分页读取。status 为 succeeded/failed/cancelled 表示结束。用 wait_s 长轮询（建议 60–120s）一次等更久，减少 leader 往返；不要用 5–25s 高频轮询。`,
     inputSchema: {
       task_id: z.string().min(1).describe('dsh_run 返回的任务 id'),
       cursor: z.number().int().min(0).optional().describe('上次返回的 next_cursor，用于只取增量事件'),
@@ -300,6 +311,8 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
             max_concurrent_per_cwd: config.maxConcurrentPerCwd,
             max_result_chars: config.maxResultChars,
             max_status_events: config.maxStatusEvents,
+            max_status_payload_bytes: config.maxStatusPayloadBytes,
+            max_event_summary_bytes: EVENT_SUMMARY_MAX_BYTES,
             task_ttl_min: Math.round(config.taskTtlMs / 60_000),
             max_tasks: config.maxTasks,
             cleanup_interval_min: Math.round(config.cleanupIntervalMs / 60_000),
@@ -668,6 +681,44 @@ async function sendProgress(extra: Extra, progressToken: string | number, progre
 
 function isTerminal(status: TaskStatus): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+}
+
+/**
+ * dsh_run(wait_s) 的整包 JSON 预算：created/hint/status 元数据与事件摘要一起计数，
+ * 超出时从尾部少放摘要；至少要保证首条摘要能放下，游标可继续。
+ */
+function fitRunPayload(
+  base: Record<string, unknown>,
+  events: RunEvent[],
+  budget: number,
+): Record<string, unknown> {
+  const included: RunEvent[] = [];
+  let payload: Record<string, unknown> = { ...base, events: included };
+  for (const event of events) {
+    const candidate = {
+      ...base,
+      events: [...included, event],
+      next_cursor: Number(event.seq ?? 0) + 1,
+    };
+    if (utf8ByteLength(JSON.stringify(candidate)) > budget) break;
+    included.push(event);
+    payload = candidate;
+  }
+  if (included.length === 0 && events.length > 0) {
+    const first = events[0]!;
+    const limit = Math.max(64, budget - utf8ByteLength(JSON.stringify(base)) - 64);
+    const small = { ...summarizeEvent(first, limit), seq: first.seq };
+    const candidate = { ...base, events: [small], next_cursor: Number(first.seq ?? 0) + 1 };
+    if (utf8ByteLength(JSON.stringify(candidate)) <= budget) {
+      included.push(small);
+      payload = candidate;
+    }
+  }
+  return {
+    ...payload,
+    events: included,
+    events_truncated: included.length < events.length || Boolean(base.events_truncated),
+  };
 }
 
 function percentile(sorted: number[], p: number): number | null {

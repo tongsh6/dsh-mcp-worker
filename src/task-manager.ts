@@ -24,6 +24,7 @@ import {
   textLooksLikeSandboxAclFailure,
 } from './sandbox-errors.js';
 import { addTokenUsage, emptyTokenUsage, extractTokenUsage } from './usage.js';
+import { EVENT_SUMMARY_MAX_BYTES, sliceJsonString, summarizeEvent, utf8ByteLength } from './event-summary.js';
 
 export interface TaskRunInput {
   id: string;
@@ -82,6 +83,10 @@ export class TaskManager {
   private readonly active = new Map<string, RunHandle>();
   private readonly queue: string[] = [];
   private readonly busySessions = new Set<string>();
+  /** 每个运行中任务实际占用过的 session id 集合；任务结束前不释放任何别名。 */
+  private readonly sessionLocks = new Map<string, Set<string>>();
+  /** 运行期实际换号：旧 id → 最新 id，供已排队任务接续。 */
+  private readonly sessionAliases = new Map<string, string>();
   private readonly activeByCwd = new Map<string, number>();
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly progressSinks = new Map<string, (progress: number, message?: string) => void>();
@@ -153,6 +158,7 @@ export class TaskManager {
     const id = this.options.idFactory?.() ?? randomUUID();
     const requestedMode = input.permissionMode ?? config.defaultPermissionMode;
     const permissionMode = requestedMode === 'auto' ? this.resolveAutoMode(input.cwd) : requestedMode;
+    const sessionId = this.resolveSessionId(input.sessionId ?? `mcp-${id}`);
     // 快速失败：关闭 ACL 自动升级时，已知不可写的目录不再让模型进去空转
     if (
       config.aclFallback === 'off' &&
@@ -169,7 +175,9 @@ export class TaskManager {
       status: 'queued',
       task: input.task,
       cwd: input.cwd,
-      sessionId: input.sessionId,
+      // 首次 run 就确定一个可用 ID（与 runner 的默认 ID 生成一致）；SDK 实际 ID 变化时由事件回填。
+      sessionId,
+      requestedPermissionMode: requestedMode,
       permissionMode,
       timeoutMs: input.timeoutMs ?? config.defaultTimeoutMs,
       createdAt: this.now(),
@@ -282,25 +290,66 @@ export class TaskManager {
       await this.waitForChange(taskId, waitMs);
     }
     const latest = this.mustGet(taskId);
-    const events = latest.events.slice(cursor, cursor + this.options.config.maxStatusEvents);
-    return {
-      task_id: latest.id,
-      status: latest.status,
-      phase: derivePhase(latest),
-      progress: countSteps(latest.events),
-      events,
-      next_cursor: cursor + events.length,
-      created_at: latest.createdAt,
-      started_at: latest.startedAt,
-      ended_at: latest.endedAt,
-      error: latest.error ?? null,
-      timed_out: latest.timedOut,
-      session_id: latest.sessionId,
-      queued_reason: latest.status === 'queued' ? this.deriveQueuedReason(latest) : null,
-      tokens: latest.usageTokens ?? null,
-      steps: countSteps(latest.events),
-      tool_calls: latest.events.filter((event) => event.type === 'tool_call').length,
+    const start = Math.min(cursor, latest.events.length);
+    const maxCount = this.options.config.maxStatusEvents;
+    const budget = this.options.config.maxStatusPayloadBytes;
+    const minEventBytes = 512;
+    const build = (selected: RunEvent[], errorText: string | null): TaskStatusPayload => {
+      const nextCursor = start + selected.length;
+      return {
+        task_id: latest.id,
+        status: latest.status,
+        phase: derivePhase(latest),
+        progress: countSteps(latest.events),
+        events: selected,
+        events_truncated: nextCursor < latest.events.length,
+        next_cursor: nextCursor,
+        created_at: latest.createdAt,
+        started_at: latest.startedAt,
+        ended_at: latest.endedAt,
+        error: errorText,
+        error_truncated: errorText !== null && latest.error !== null && errorText !== latest.error,
+        timed_out: latest.timedOut,
+        session_id: latest.sessionId,
+        queued_reason: latest.status === 'queued' ? this.deriveQueuedReason(latest) : null,
+        tokens: latest.usageTokens ?? null,
+        steps: countSteps(latest.events),
+        tool_calls: latest.events.filter((event) => event.type === 'tool_call').length,
+      };
     };
+
+    // error 先按「JSON 序列化后的字节」缩到预算内，并给至少一条事件摘要留出空间。
+    const baseNoErrorBytes = utf8ByteLength(JSON.stringify(build([], null)));
+    let errorText: string | null = null;
+    if (latest.error) {
+      const errorJsonLimit = Math.max(0, budget - minEventBytes - baseNoErrorBytes - 64);
+      errorText = sliceJsonString(latest.error, errorJsonLimit).text;
+    }
+    let payload = build([], errorText);
+    while (utf8ByteLength(JSON.stringify(payload)) > budget - minEventBytes && errorText) {
+      const smaller = Math.max(0, Math.floor(utf8ByteLength(JSON.stringify(errorText)) / 2) - 1);
+      errorText = sliceJsonString(errorText, smaller).text;
+      payload = build([], errorText);
+    }
+
+    // 逐条加入摘要，并按整包 JSON 字节严格卡上限；空间不足时缩小摘要，保证游标至少前进一条。
+    const selected: RunEvent[] = [];
+    for (let index = start; index < latest.events.length && selected.length < maxCount; index += 1) {
+      const room = budget - utf8ByteLength(JSON.stringify(payload)) - 2;
+      if (room < minEventBytes && selected.length > 0) break;
+      const digestLimit = Math.max(128, Math.min(EVENT_SUMMARY_MAX_BYTES - 16, room - 16));
+      let digest = { ...summarizeEvent(latest.events[index]!, digestLimit), seq: index };
+      let candidate = build([...selected, digest], errorText);
+      if (utf8ByteLength(JSON.stringify(candidate)) > budget) {
+        if (selected.length > 0) break;
+        digest = { ...summarizeEvent(latest.events[index]!, Math.max(64, Math.floor(digestLimit / 2))), seq: index };
+        candidate = build([digest], errorText);
+        if (utf8ByteLength(JSON.stringify(candidate)) > budget) break;
+      }
+      selected.push(digest);
+      payload = candidate;
+    }
+    return payload;
   }
 
   async result(taskId: string): Promise<TaskResultPayload> {
@@ -381,7 +430,8 @@ export class TaskManager {
   }
 
   private deriveQueuedReason(record: TaskRecord): QueuedReason | null {
-    if (record.sessionId && this.busySessions.has(record.sessionId)) return 'session';
+    const sessionId = record.sessionId ? this.resolveSessionId(record.sessionId) : undefined;
+    if (sessionId && this.busySessions.has(sessionId)) return 'session';
     const cwdKey = normalizeCwd(record.cwd);
     if ((this.activeByCwd.get(cwdKey) ?? 0) >= this.options.config.maxConcurrentPerCwd) return 'concurrency';
     if (this.active.size >= this.options.config.maxConcurrent) return 'concurrency';
@@ -394,7 +444,8 @@ export class TaskManager {
       const index = this.queue.findIndex((taskId) => {
         const record = this.tasks.get(taskId);
         if (!record) return true;
-        if (record.sessionId && this.busySessions.has(record.sessionId)) return false;
+        const sessionId = record.sessionId ? this.resolveSessionId(record.sessionId) : undefined;
+        if (sessionId && this.busySessions.has(sessionId)) return false;
         return (this.activeByCwd.get(normalizeCwd(record.cwd)) ?? 0) < maxConcurrentPerCwd;
       });
       if (index < 0) return; // 队列里剩下的都在等 session 或 cwd 额度
@@ -412,7 +463,15 @@ export class TaskManager {
     const cwdKey = normalizeCwd(record.cwd);
     record.status = 'running';
     record.startedAt = this.now();
-    if (record.sessionId) this.busySessions.add(record.sessionId);
+    // 任务启动时把「请求 ID + 最新实际 ID」都计入占用；运行期换号只增不减，直到任务结束。
+    const requestedSessionId = record.sessionId;
+    const resolvedSessionId = requestedSessionId ? this.resolveSessionId(requestedSessionId) : undefined;
+    const sessionLocks = new Set<string>();
+    if (requestedSessionId) sessionLocks.add(requestedSessionId);
+    if (resolvedSessionId) sessionLocks.add(resolvedSessionId);
+    for (const sessionId of sessionLocks) this.busySessions.add(sessionId);
+    this.sessionLocks.set(taskId, sessionLocks);
+    if (resolvedSessionId) record.sessionId = resolvedSessionId;
     this.activeByCwd.set(cwdKey, (this.activeByCwd.get(cwdKey) ?? 0) + 1);
     await this.saveQuietly(record);
     this.audit({
@@ -430,9 +489,20 @@ export class TaskManager {
     const cached = this.capabilities?.get(record.cwd) ?? null;
     let initialPermission = record.permissionMode;
     let preFallback = false;
+    // cwd 能力缓存记录的是「该目录能否 workspace-write」；auto 的执行策略仍是优先 worktree。
+    const autoCachedDanger =
+      record.requestedPermissionMode === 'auto' &&
+      record.permissionMode === 'danger-full-access' &&
+      cached?.mode === 'danger-full-access' &&
+      config.autoWorktree;
     if (record.permissionMode === 'workspace-write' && cached?.mode === 'danger-full-access' && config.autoWorktree) {
       await this.attachWorktree(record);
       if (record.worktree) initialPermission = 'workspace-write';
+    } else if (autoCachedDanger) {
+      if (await this.attachWorktree(record)) {
+        record.permissionMode = 'workspace-write';
+        initialPermission = 'workspace-write';
+      }
     }
     if (record.permissionMode === 'workspace-write' && cached && cached.mode !== 'workspace-write' && !record.worktree) {
       preFallback = true;
@@ -555,7 +625,13 @@ export class TaskManager {
       record.endedAt = this.now();
     } finally {
       this.active.delete(taskId);
-      if (record.sessionId) this.busySessions.delete(record.sessionId);
+      const sessionLocks = this.sessionLocks.get(taskId);
+      if (sessionLocks) {
+        for (const sessionId of sessionLocks) this.busySessions.delete(sessionId);
+        this.sessionLocks.delete(taskId);
+      } else if (record.sessionId) {
+        this.busySessions.delete(record.sessionId);
+      }
       const remaining = (this.activeByCwd.get(cwdKey) ?? 1) - 1;
       if (remaining <= 0) this.activeByCwd.delete(cwdKey);
       else this.activeByCwd.set(cwdKey, remaining);
@@ -653,6 +729,10 @@ export class TaskManager {
   private handleEvent(taskId: string, event: RunEvent): void {
     const record = this.tasks.get(taskId);
     if (!record) return;
+    // DSH 实际 session id（首次 / -r 重试 / resume 换新）以事件为准回填，保证跨 run/status/result/tasks 一致。
+    if (event.type === 'session' && typeof event.sessionId === 'string') {
+      this.setSessionId(record, event.sessionId);
+    }
     record.events.push(event);
     // 只有「workspace-write 模式 + 工具真的报错」才认作 ACL 沙箱失败；read-only / danger-full-access / 纯文本引用不算
     if (record.permissionMode === 'workspace-write' && event.type === 'tool_result') {
@@ -695,7 +775,39 @@ export class TaskManager {
     this.notify(taskId);
   }
 
+  /** 沿运行期换号链解析到最新实际 session id。 */
+  private resolveSessionId(sessionId: string): string {
+    let current = sessionId;
+    const seen = new Set<string>();
+    while (!seen.has(current)) {
+      seen.add(current);
+      const next = this.sessionAliases.get(current);
+      if (!next || next === current) break;
+      current = next;
+    }
+    return current;
+  }
+
+  /** 回填实际 session id：保留旧 id 占用，登记别名链，并持久化到 meta。 */
+  private setSessionId(record: TaskRecord, sessionId: string | null | undefined): void {
+    if (!sessionId || sessionId === record.sessionId) return;
+    const previous = record.sessionId;
+    record.sessionId = sessionId;
+    if (previous) this.sessionAliases.set(previous, sessionId);
+    const locks = this.sessionLocks.get(record.id);
+    if (locks) {
+      if (previous) locks.add(previous);
+      locks.add(sessionId);
+    }
+    if (record.status === 'running' || this.active.has(record.id)) {
+      if (previous) this.busySessions.add(previous);
+      this.busySessions.add(sessionId);
+    }
+    void this.saveQuietly(record);
+  }
+
   private applyOutcome(record: TaskRecord, outcome: RunOutcome, timeoutMs: number): void {
+    if (outcome.sessionId) this.setSessionId(record, outcome.sessionId);
     record.exitCode = outcome.exitCode;
     record.finalText = outcome.finalText;
     record.timedOut = outcome.timedOut;

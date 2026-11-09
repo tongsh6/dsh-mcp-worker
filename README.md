@@ -183,7 +183,7 @@ ChatGPT web 只接受**远程 MCP**（Streamable HTTP / SSE），不接受 stdio
 | 工具 | 作用 | 关键参数 |
 |---|---|---|
 | `dsh_run` | 提交任务，**立即**返回 `task_id` | `task`（必填）、`cwd`（必填，项目目录）、`session_id?`、`permission_mode?`、`timeout_s?` |
-| `dsh_status` | 查状态 + 增量事件，支持长轮询 | `task_id`、`cursor?`、`wait_s?`（0–25） |
+| `dsh_status` | 查状态 + 紧凑增量事件摘要（单条 ≤2KiB、单次 ≤16KiB；原始事件仍完整落盘，可用 `dsh_read_result(source=events)` 读取），支持长轮询 | `task_id`、`cursor?`、`wait_s?`（0–25） |
 | `dsh_result` | 取最终结果（输出过大自动落盘） | `task_id` |
 | `dsh_cancel` | 取消任务（杀进程树） | `task_id` |
 | `dsh_tasks` | 列出最近任务摘要（回顾/继续轮询） | `limit?`（1–100）、`status?` |
@@ -306,7 +306,8 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_NOTIFY_WEBHOOK` | 无 | 任务结束 POST 通知（JSON） |
 | `DSH_MCP_NOTIFY_CMD` | 无 | 任务结束执行命令（`DSH_MCP_NOTIFY_JSON` 环境变量传事件） |
 | `DSH_MCP_MAX_RESULT_CHARS` | `40000` | 结果超长时落盘阈值 |
-| `DSH_MCP_MAX_STATUS_EVENTS` | `100` | 单次 `dsh_status` 最多返回多少条事件 |
+| `DSH_MCP_MAX_STATUS_EVENTS` | `100` | 单次 `dsh_status` 最多返回多少条事件（仍受字节预算限制） |
+| `DSH_MCP_MAX_STATUS_PAYLOAD_BYTES` | `16384` | 单次 `dsh_status` 结构化载荷（JSON）的 UTF-8 字节上限；超出时只返回能放下的摘要并标记 `events_truncated` |
 | `DSH_MCP_TASKS_DIR` | `$DSH_HOME/mcp-tasks` | 任务落盘根目录 |
 | `DSH_HOME` | `~/.dsh` | DSH 状态目录（会透传给子进程） |
 
