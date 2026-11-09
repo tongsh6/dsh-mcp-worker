@@ -30,5 +30,29 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
-  }
+  },
+  "license": "MIT",
+  "author": "tongsh6",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tongsh6/dsh-mcp-worker.git"
+  },
+  "homepage": "https://github.com/tongsh6/dsh-mcp-worker#readme",
+  "bugs": {
+    "url": "https://github.com/tongsh6/dsh-mcp-worker/issues"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "dsh",
+    "deepseek",
+    "claude-code",
+    "codex",
+    "chatgpt",
+    "worker",
+    "delegation"
+  ],
+  "files": [
+    "dist"
+  ]
 }

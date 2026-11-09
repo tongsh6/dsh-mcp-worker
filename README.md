@@ -76,6 +76,27 @@ pwsh -File scripts/deploy.ps1 -Target D:\dsh-mcp-worker
 - 更新流程：`git pull` → `pnpm install` → `pnpm test` → `scripts/deploy.ps1` → 重启 leader 会话；
 - 默认运行目录可用 `DSH_MCP_WORKER_HOME` 指定，也可直接 `pnpm deploy`（等价于执行该脚本）。
 
+## 通过 npm 使用
+
+包名：`dsh-mcp-worker`（只发布构建产物；本机仍需安装 DSH）。
+
+```powershell
+npm i -g dsh-mcp-worker      # 或直接用 npx
+npx -y dsh-mcp-worker        # 由 MCP 客户端拉起（stdio）
+```
+
+MCP 客户端配置可用：
+
+```json
+{
+  "mcpServers": {
+    "dsh": { "command": "npx", "args": ["-y", "dsh-mcp-worker"] }
+  }
+}
+```
+
+注意：npm 包**不包含 DSH 本体**；worker 通过 `dsh`（PATH）、`DSH_MCP_DSH_DIR` 或 `DSH_MCP_DSH_CLI` 找到本机 DSH。
+
 ## 接入 leader
 
 ### 1) Claude Code（最省事）
@@ -398,6 +419,24 @@ pnpm build         # tsc 产物到 dist/
 ```
 
 测试覆盖：NDJSON 解析/截断、输出落盘、session 锁、dsh 进程超时与取消、任务管理器（并发/每 cwd 配额/session 串行/长轮询/恢复/取消/TTL 清理/数量上限/审计）、JSON-RPC 客户端、SDK 长驻后端与池、HTTP 传输（鉴权/healthz）、审批桥、新增只读工具、DSH token 用量提取与累加、DSH 兼容补丁（编码前缀 + GBK 兜底解码；apply/notify/off/幂等/版本漂移）。
+
+## 发布到 npm（维护者）
+
+发布由 **GitHub Actions** 完成（`.github/workflows/publish.yml`），不在本地 `npm publish`：
+
+1. 在仓库 Settings → Secrets and variables → Actions 添加 `NPM_TOKEN`（npm Automation token，具备 publish 权限）；
+2. 更新版本并打 tag：
+   ```powershell
+   npm version patch --no-git-tag-version   # 或手动改 package.json
+   git add -A
+   git commit -m "chore(release): vX.Y.Z"
+   git tag vX.Y.Z
+   git push --follow-tags
+   ```
+3. tag 推送后 Actions 自动执行 `pnpm test` → `pnpm build` → `npm publish --access public --provenance`；
+4. 也可在 Actions → publish → Run workflow 手动触发（`workflow_dispatch`）。
+
+License：MIT（见 [LICENSE](LICENSE)）。
 
 ## 路线图
 
