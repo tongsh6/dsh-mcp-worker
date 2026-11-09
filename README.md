@@ -52,7 +52,7 @@ dsh-mcp-worker（本进程）
 ## 快速开始
 
 ```powershell
-cd D:\github\dsh-mcp-worker
+cd C:\path\to\dsh-mcp-worker
 pnpm install
 pnpm build
 pnpm test          # 103 个单测
@@ -66,7 +66,7 @@ worker 通过 **stdio** 工作，自身不监听任何端口。需要它时由 l
 ### 1) Claude Code（最省事）
 
 ```powershell
-claude mcp add --scope user --transport stdio dsh -- node "D:\github\dsh-mcp-worker\dist\index.js"
+claude mcp add --scope user --transport stdio dsh -- node "C:\path\to\dsh-mcp-worker\dist\index.js"
 claude mcp list
 claude mcp get dsh
 ```
@@ -74,7 +74,7 @@ claude mcp get dsh
 带环境变量时注意 `--env` 的位置（放在 server 名之前）：
 
 ```powershell
-claude mcp add --scope user --transport stdio --env DSH_MCP_DEFAULT_CWD="D:\work\repo" dsh -- node "D:\github\dsh-mcp-worker\dist\index.js"
+claude mcp add --scope user --transport stdio --env DSH_MCP_DEFAULT_CWD="D:\work\repo" dsh -- node "C:\path\to\dsh-mcp-worker\dist\index.js"
 ```
 
 等价 `.mcp.json` 见 [examples/claude-mcp.json](examples/claude-mcp.json)。
@@ -96,7 +96,7 @@ claude mcp add --scope user --transport stdio --env DSH_MCP_DEFAULT_CWD="D:\work
 ```toml
 [mcp_servers.dsh]
 command = "node"
-args = ["D:\\github\\dsh-mcp-worker\\dist\\index.js"]
+args = ["C:\\path\\to\\dsh-mcp-worker\\dist\\index.js"]
 startup_timeout_sec = 30          # 默认 10；worker 自身启动很快，留余量
 tool_timeout_sec = 300            # 默认 60；allow dsh_status 长轮询（wait_s≤120s）
 enabled_tools = ["dsh_run", "dsh_status", "dsh_result", "dsh_cancel", "dsh_describe", "dsh_tasks", "dsh_audit", "dsh_read_result", "dsh_batch_run", "dsh_batch_status", "dsh_batch_result", "dsh_search", "dsh_metrics"]
@@ -126,7 +126,7 @@ ChatGPT web 只接受**远程 MCP**（Streamable HTTP / SSE），不接受 stdio
 - **推荐**：OpenAI Secure MCP Tunnel（需要 Platform 组织 + `tunnel_id` + runtime API key）：
   ```bash
   tunnel-client init --sample sample_mcp_stdio_local --profile dsh-local \
-    --tunnel-id tunnel_xxxxxxxx --mcp-command "node D:\\github\\dsh-mcp-worker\\dist\\index.js"
+    --tunnel-id tunnel_xxxxxxxx --mcp-command "node C:\\path\\to\\dsh-mcp-worker\\dist\\index.js"
   tunnel-client run --profile dsh-local
   ```
   然后在 ChatGPT → Plugins → `+` → Add custom MCP server → Connection 选 Tunnel → Create。
@@ -261,7 +261,7 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_CAPABILITY_TTL_H` | `24` | cwd 能力缓存 TTL（小时） |
 | `DSH_MCP_RETRY_TRANSIENT` | `1` | 后端崩溃/初始化失败时自动重试一次 |
 | `DSH_MCP_AUTO_WORKTREE` | `1` | ACL 受限仓库自动创建可写 worktree（仅干净 git 仓库） |
-| `DSH_MCP_WORKTREE_ROOT` | `D:/work/worktrees/dsh` | 自动 worktree 根目录 |
+| `DSH_MCP_WORKTREE_ROOT` | `~/dsh-worktrees` | 自动 worktree 根目录 |
 | `DSH_MCP_NOTIFY_WEBHOOK` | 无 | 任务结束 POST 通知（JSON） |
 | `DSH_MCP_NOTIFY_CMD` | 无 | 任务结束执行命令（`DSH_MCP_NOTIFY_JSON` 环境变量传事件） |
 | `DSH_MCP_MAX_RESULT_CHARS` | `40000` | 结果超长时落盘阈值 |
@@ -329,7 +329,7 @@ worker 重启时，未完成的 `queued/running` 任务会被标记为 `failed`�
 | 现象 | 处理 |
 |---|---|
 | leader 里工具列表没有 dsh_* | 检查命令路径、`node` 版本（需 ≥20）；Claude Code 用 `claude mcp get dsh` 看状态与日志 |
-| `DSH worker 错误 [invalid_cwd]` | 传具体项目目录；不要用 `C:\Users\tongs` 这类主目录 |
+| `DSH worker 错误 [invalid_cwd]` | 传具体项目目录；不要用 `C:\Users\<user>` 这类主目录 |
 | `DSH worker 错误 [task_not_finished]` | 任务还没结束：先 `dsh_status` 轮询到终态，再 `dsh_result` |
 | 任务 `failed` 且 error 提到 approval | 当前任务需要审批（如写工作区外）：换 `permission_mode=danger-full-access` 或把操作限定在 cwd 内 |
 | Codex/ChatGPT 桌面端每次调用仍弹授权 | 确认 `config.toml` 中是 `default_tools_approval_mode = "approve"`（不是 `auto`）+ 13 个 per-tool `approve`，并**完全退出重开 app**；仍复现则是桌面端已知 bug（openai/codex#40793），可点「始终允许」、升级 app，或改用 Claude Code / `codex exec`（CLI 尊重配置） |
@@ -392,6 +392,6 @@ pnpm build         # tsc 产物到 dist/
 - **M4 ✅ 已完成（2026-11-02）**：批量派发（fan-out）/ 历史任务检索 / 指标快照 / 轻量 OTel span 导出。
 - **M5 ✅ 已完成（2026-11-02）**：目标达成率测量——worker 侧 DSH token 计量、A/B 对照工具、leader 用量扫描器、口径文档。
 
-> 设计依据与市场调研见 `C:\Users\tongs\dsh-mcp-analysis\DSH-as-MCP-Worker-综合分析报告.md`。
+> 设计依据与市场调研见 `本机分析报告（未随仓库提供）`。
 
 

@@ -150,7 +150,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     capabilityTtlMs: readInt(env, 'DSH_MCP_CAPABILITY_TTL_H', 24, 1, 8_760) * 3_600_000,
     retryTransient: readBool(env, 'DSH_MCP_RETRY_TRANSIENT', true),
     autoWorktree: readBool(env, 'DSH_MCP_AUTO_WORKTREE', true),
-    worktreeRoot: resolve(env.DSH_MCP_WORKTREE_ROOT?.trim() || 'D:/work/worktrees/dsh'),
+    worktreeRoot: resolve(env.DSH_MCP_WORKTREE_ROOT?.trim() || join(homedir(), 'dsh-worktrees')),
     ...(env.DSH_MCP_NOTIFY_WEBHOOK?.trim() ? { notifyWebhook: env.DSH_MCP_NOTIFY_WEBHOOK.trim() } : {}),
     ...(env.DSH_MCP_NOTIFY_CMD?.trim() ? { notifyCmd: env.DSH_MCP_NOTIFY_CMD.trim() } : {}),
     taskTtlMs: readInt(env, 'DSH_MCP_TASK_TTL_MIN', 1_440, 1, 100_000) * 60_000,
@@ -184,7 +184,6 @@ export function resolveDshEntry(env: NodeJS.ProcessEnv = process.env, exists: (p
   const candidates: string[] = [];
   const dir = env.DSH_MCP_DSH_DIR?.trim();
   if (dir) candidates.push(join(resolve(dir), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'));
-  candidates.push(join('D:\\dsh-harness', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'));
   for (const candidate of candidates) {
     if (exists(candidate)) {
       return { command: process.execPath, args: [candidate], source: `auto:${candidate}` };

@@ -3,11 +3,9 @@
     "dsh": {
       "type": "stdio",
       "command": "node",
-      "args": ["D:\\github\\dsh-mcp-worker\\dist\\index.js"],
+      "args": ["C:\\path\\to\\dsh-mcp-worker\\dist\\index.js"],
       "env": {
-        "DSH_MCP_TASKS_DIR": "C:\\Users\\tongs\\.dsh\\mcp-tasks",
-        "DSH_MCP_PERMISSION_MODE": "workspace-write",
-        "DSH_MCP_DEFAULT_CWD": ""
+        "DSH_MCP_PERMISSION_MODE": "auto"
       }
     }
   }
