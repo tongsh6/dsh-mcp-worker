@@ -4,3 +4,5 @@ dist/
 .dsh-mcp/
 test/.tmp/
 measure-runs/
+
+.serena/
