@@ -37,8 +37,20 @@ export class JsonlTaskStore implements TaskStore {
     const { events: _events, ...meta } = record;
     const target = join(dir, 'meta.json');
     const tmp = `${target}.tmp`;
-    await writeFile(tmp, JSON.stringify(meta, null, 2), 'utf8');
-    await rename(tmp, target);
+    const payload = JSON.stringify(meta, null, 2);
+    // Windows 下杀毒/搜索索引/测试并行会瞬时占用文件句柄，单次失败不应静默丢 meta（session id 等关键字段）。
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await writeFile(tmp, payload, 'utf8');
+        await rename(tmp, target);
+        return;
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+      }
+    }
+    throw lastError;
   }
 
   async appendEvent(taskId: string, event: RunEvent): Promise<void> {
