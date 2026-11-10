@@ -10,3 +10,6 @@ measure-runs/
 .idea/
 
 test-tasks/
+
+__pycache__/
+*.pyc

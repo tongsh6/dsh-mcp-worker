@@ -9,11 +9,14 @@ import type { BatchManager } from './batch-manager.js';
 import { PERMISSION_MODES, validateCwd, type WorkerConfig } from './config.js';
 import { WorkerError } from './errors.js';
 import { EVENT_SUMMARY_MAX_BYTES, summarizeEvent, utf8ByteLength } from './event-summary.js';
+import { IdempotencyStore } from './idempotency.js';
 import { boundText } from './output.js';
+import { estimateCost, pricingView } from './pricing.js';
 import { injectReportProtocol } from './report-protocol.js';
 import { searchTasks } from './search.js';
 import type { TaskManager } from './task-manager.js';
 import type { RunEvent, TaskRecord, TaskStatus } from './types.js';
+import { buildUsageReport } from './usage-report.js';
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
@@ -32,6 +35,9 @@ const INSTRUCTIONS = [
   '验收：leader 只审阅结构化事实并决定是否返工——优先看 dsh_result 的 evidence（命令退出码/变更文件/git diff 摘要）与 outcome；outcome=needs_decision 时用原 session_id 回答；output 是 DSH 的叙述，不作为唯一依据。不要逐步重做 DSH 已完成的工作；DSH 失败时把 error 原样反馈用户。',
   '历史任务用 dsh_tasks 回顾；审计事件用 dsh_audit；dsh_result 输出过长落盘时用 dsh_read_result 分页读取（source=result/events/diff/evidence）；运行指标用 dsh_metrics。',
   '长任务依赖异步任务模型：不要在一次工具调用里反复短轮询等待。',
+  '用量与成本：用 dsh_usage(days, cwd) 查看窗口内任务数/耗时/DSH token 与估算费用（单价可用 DSH_MCP_PRICE_* 覆盖）；单任务费用见 dsh_result.usage.cost_usd/cost_cny。费用是估算值，仅供参考。',
+  '重试安全：同一工作单元重试时可带相同的 idempotency_key，重复提交会返回同一个 task，不会重复派活。',
+  '控制 DSH 上下文：在 task 里要求 DSH 先用 grep/glob 定位、只读必要片段（DSH 的 token 大头是 cacheRead）；大结果让它写文件、只回摘要，再用 max_chars/offset 分页读取。',
 ].join('\n');
 
 export interface WorkerServerDeps {
@@ -43,6 +49,8 @@ export interface WorkerServerDeps {
   batches?: BatchManager;
   /** 可选：运行时信息（进程/后端池/OTel 状态），供 dsh_metrics 使用。 */
   runtimeInfo?: () => Record<string, unknown>;
+  /** 可选：幂等键索引（缺省按 config.idemDir 自动创建）。 */
+  idem?: IdempotencyStore;
 }
 
 export function createWorkerServer(deps: WorkerServerDeps): McpServer {
@@ -53,6 +61,9 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
   );
   const mcpMetrics = createMcpMetrics();
   (server as unknown as { __mcpMetrics?: McpMetrics }).__mcpMetrics = mcpMetrics;
+  // 幂等键：落盘索引 + 进程内 pending 表（避免同一 key 并发提交时重复派活）。
+  const idem = deps.idem ?? new IdempotencyStore(config.idemDir, config.idemTtlMs);
+  const pendingIdemTasks = new Map<string, Promise<string>>();
 
   const ok = (payload: Record<string, unknown>) => ({
     content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
@@ -86,13 +97,19 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         .enum(RUN_PERMISSION_MODES)
         .optional()
         .describe('权限模式，默认 auto（worker 按 cwd 能力自动选 workspace-write / danger-full-access）'),
-      timeout_s: z.number().int().min(5).max(86_400).optional().describe('任务超时秒数，默认 900；大任务可设 1800–3600'),
+      timeout_s: z.number().int().min(5).max(86_400).optional().describe('任务超时秒数，默认 1800；大任务可设 1800–3600'),
       wait_s: z
         .number()
         .min(0)
         .max(600)
         .optional()
         .describe('可选：提交后在本次调用里等待最多 N 秒（建议 60–120），减少 dsh_status 往返；任务未结束时返回中间状态'),
+      idempotency_key: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('幂等键（可选）：同一 key 的重复提交返回同一个 task，重试不会重复派活（默认 24h 内有效，DSH_MCP_IDEM_TTL_H 可配）'),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     handler: async (args, extra) => {
@@ -101,40 +118,89 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         const rawCwd = args.cwd ?? config.defaultCwd ?? process.cwd();
         const cwd = validateCwd(rawCwd, config);
         const progressToken = extra._meta?.progressToken;
-        const record = await manager.create(
-          {
-            task: config.reportProtocol ? injectReportProtocol(args.task) : args.task,
-            cwd,
-            sessionId: args.session_id,
-            permissionMode: args.permission_mode,
-            timeoutMs: args.timeout_s ? args.timeout_s * 1_000 : undefined,
-          },
-          {
-            onProgress:
-              progressToken !== undefined
-                ? (progress, message) => {
-                    void sendProgress(extra, progressToken, progress, message);
-                  }
-                : undefined,
-          },
-        );
+        const onProgress =
+          progressToken !== undefined
+            ? (progress: number, message?: string) => {
+                void sendProgress(extra, progressToken, progress, message);
+              }
+            : undefined;
+        const idemKey =
+          typeof args.idempotency_key === 'string' && args.idempotency_key.length > 0 ? args.idempotency_key : undefined;
+
+        // 幂等键：先查落盘索引，再查进程内并发创建，最后才真正派活。
+        let record: TaskRecord | undefined;
+        let idempotentReuse = false;
+        if (idemKey) {
+          const existingId = await idem.lookup(idemKey);
+          if (existingId) {
+            const existing = manager.get(existingId);
+            if (existing) {
+              record = existing;
+              idempotentReuse = true;
+            } else {
+              // 任务记录已被清理（TTL/容量），索引失效，按新任务处理。
+              await idem.forget(idemKey);
+            }
+          }
+        }
+        if (!record && idemKey) {
+          const inFlight = pendingIdemTasks.get(idemKey);
+          if (inFlight) {
+            const taskId = await inFlight;
+            record = manager.get(taskId);
+            idempotentReuse = record !== undefined;
+          }
+        }
+        if (!record) {
+          const creation = manager.create(
+            {
+              task: config.reportProtocol ? injectReportProtocol(args.task) : args.task,
+              cwd,
+              sessionId: args.session_id,
+              permissionMode: args.permission_mode,
+              timeoutMs: args.timeout_s ? args.timeout_s * 1_000 : undefined,
+              ...(idemKey ? { idempotencyKey: idemKey } : {}),
+            },
+            { onProgress },
+          );
+          if (idemKey) {
+            const registered = creation.then(async (created) => {
+              await idem.remember(idemKey, created.id).catch(() => undefined);
+              return created.id;
+            });
+            pendingIdemTasks.set(idemKey, registered);
+            try {
+              record = await creation;
+            } finally {
+              pendingIdemTasks.delete(idemKey);
+            }
+          } else {
+            record = await creation;
+          }
+        }
+        if (!record) throw new WorkerError('internal', '任务创建失败（内部状态异常）');
+        const current: TaskRecord = record;
+
         const created = {
-          task_id: record.id,
-          status: record.status,
-          session_id: record.sessionId ?? null,
-          cwd: record.cwd,
-          permission_mode: record.permissionMode,
-          created_at: record.createdAt,
-          hint: '任务已受理：用 dsh_status 轮询（wait_s 可长轮询取增量事件），结束后用 dsh_result 取结果；需要中断用 dsh_cancel。',
+          task_id: current.id,
+          status: current.status,
+          session_id: current.sessionId ?? null,
+          cwd: current.cwd,
+          permission_mode: current.permissionMode,
+          created_at: current.createdAt,
+          idempotent_reuse: idempotentReuse,
+          hint: idempotentReuse
+            ? '幂等命中：已复用同 idempotency_key 的任务（未重复派活）。用 dsh_status/dsh_result 取进度与结果。'
+            : '任务已受理：用 dsh_status 轮询（wait_s 可长轮询取增量事件），结束后用 dsh_result 取结果；需要中断用 dsh_cancel。',
         };
         if (!args.wait_s || args.wait_s <= 0) return ok(created);
         const deadline = Date.now() + args.wait_s * 1_000;
-        let status = await manager.status(record.id, { waitMs: args.wait_s * 1_000 });
+        let status = await manager.status(current.id, { waitMs: args.wait_s * 1_000 });
         let firstPage: typeof status | null = status.events.length > 0 ? status : null;
         while (!isTerminal(status.status) && Date.now() < deadline) {
           const remaining = deadline - Date.now();
           if (remaining <= 0) break;
-          const next = await manager.status(record.id, { cursor: status.next_cursor, waitMs: remaining });
+          const next = await manager.status(current.id, { cursor: status.next_cursor, waitMs: remaining });
           if (!firstPage && next.events.length > 0) firstPage = next;
           const noProgress = next.next_cursor === status.next_cursor && !isTerminal(next.status);
           status = next;
@@ -209,9 +275,22 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
   registerTool(server, 'dsh_result', {
     title: '获取 DSH 任务结果',
     description:
-      '任务结束后获取最终结果。验收优先看 `evidence`（命令退出码、变更文件、git diff 摘要）与 `outcome`（completed/needs_decision/failed/cancelled）；失败/取消时看 `failure_kind`（如 sandbox_acl）、`sandbox_blocked`/`sandbox_blocked_detail` 与 `attempts`（逐次尝试 + 首次决策文本，避免归因丢失）；`output` 是 DSH 的叙述。输出过大时会自动落盘并返回文件路径。任务未结束时返回错误。',
+      '任务结束后获取最终结果。验收优先看 `evidence`（命令退出码、变更文件、git diff 摘要）与 `outcome`（completed/needs_decision/failed/cancelled）；失败/取消时看 `failure_kind`（如 sandbox_acl）、`sandbox_blocked`/`sandbox_blocked_detail` 与 `attempts`（逐次尝试 + 首次决策文本，避免归因丢失）；`output` 是 DSH 的叙述。输出过大时会自动落盘并返回文件路径；传 offset/max_chars 可在本次调用里直接分页续读。',
     inputSchema: {
       task_id: z.string().min(1).describe('dsh_run 返回的任务 id'),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe('从最终输出的第 N 个字符开始读（分页续读；用上次返回的 output_pagination.next_offset）'),
+      max_chars: z
+        .number()
+        .int()
+        .min(100)
+        .max(200_000)
+        .optional()
+        .describe(`本次最多返回多少字符，默认 ${config.maxResultChars}`),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
     handler: async (args) => {
@@ -219,7 +298,23 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
         const payload = await manager.result(args.task_id);
         let output = payload.output;
         const artifacts: Array<{ kind: string; path: string }> = [];
-        if (output && output.length > config.maxResultChars) {
+        let outputPagination: Record<string, unknown> | null = null;
+        const paged = args.offset !== undefined || args.max_chars !== undefined;
+        if (paged) {
+          const fullText = output ?? '';
+          const total = fullText.length;
+          const start = Math.max(0, Math.min(Number(args.offset ?? 0), total));
+          const size = Math.max(100, Number(args.max_chars ?? config.maxResultChars));
+          const end = Math.min(start + size, total);
+          output = fullText.slice(start, end);
+          outputPagination = {
+            offset: start,
+            max_chars: size,
+            total_chars: total,
+            next_offset: end < total ? end : null,
+            truncated: end < total,
+          };
+        } else if (output && output.length > config.maxResultChars) {
           const bounded = await boundText(output, {
             maxChars: config.maxResultChars,
             spillDir: config.tasksDir,
@@ -238,8 +333,9 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
           output,
           artifacts,
           approval,
-          ...(artifacts.length > 0
-            ? { read_hint: '完整产物可用 dsh_read_result（source=result/events，offset 分页）读取' }
+          output_pagination: outputPagination,
+          ...(artifacts.length > 0 && !paged
+            ? { read_hint: '完整产物可用 dsh_read_result（source=result/events，offset 分页）读取，或直接 dsh_result(offset=next_offset, max_chars=N) 续读' }
             : {}),
         });
       } catch (error) {
@@ -287,6 +383,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
             'dsh_batch_result',
             'dsh_search',
             'dsh_metrics',
+            'dsh_usage',
             'dsh_describe',
           ],
           dsh: {
@@ -312,6 +409,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
             timeout_s: Math.round(config.defaultTimeoutMs / 1_000),
             cwd: config.defaultCwd ?? null,
             allowed_cwds: config.allowedCwds,
+            pricing: pricingView(config.pricing),
           },
           limits: {
             max_concurrent: config.maxConcurrent,
@@ -327,6 +425,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
             max_tasks: config.maxTasks,
             cleanup_interval_min: Math.round(config.cleanupIntervalMs / 60_000),
             max_batch_tasks: config.maxBatchTasks,
+            idempotency_ttl_h: Math.round(config.idemTtlMs / 3_600_000),
           },
           otel: {
             enabled: Boolean(config.otelEndpoint),
@@ -339,6 +438,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
           },
           audit_file: deps.audit?.filePath ?? null,
           tasks_dir: config.tasksDir,
+          idem_dir: config.idemDir,
           instructions: INSTRUCTIONS,
         });
       } catch (error) {
@@ -556,6 +656,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
           total: 0,
           tasks_with_usage: 0,
         };
+        const cost = { usd: 0, cny: 0, tasks_priced: 0 };
         for (const task of tasks) {
           counts[task.status] += 1;
           if (isTerminal(task.status) && task.startedAt !== undefined && task.endedAt !== undefined) {
@@ -569,6 +670,12 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
             tokens.reasoning += task.usageTokens.reasoningTokens;
             tokens.total += task.usageTokens.totalTokens;
             tokens.tasks_with_usage += 1;
+            const estimate = estimateCost(task.usageTokens, config.pricing);
+            if (estimate) {
+              cost.usd += estimate.usd;
+              cost.cny += estimate.cny;
+              cost.tasks_priced += 1;
+            }
           }
         }
         const sorted = durations.sort((a, b) => a - b);
@@ -594,6 +701,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
           counts,
           total: tasks.length,
           tokens,
+          cost,
           outcomes,
           rework: { sessions_reentered: reworkSessions, tasks_total: tasks.length },
           evidence: { tasks_with_git: tasksWithGit, commands_failed_total: commandsFailedTotal },
@@ -611,8 +719,32 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
             max_tasks: config.maxTasks,
             max_batch_tasks: config.maxBatchTasks,
           },
+          pricing: pricingView(config.pricing),
           runtime: deps.runtimeInfo?.() ?? null,
         });
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  });
+
+  registerTool(server, 'dsh_usage', {
+    title: '查询用量与成本',
+    description:
+      '按时间窗口聚合任务数/状态分布/耗时/DSH token 与估算费用（单价 DSH_MCP_PRICE_*、汇率 DSH_MCP_USD_CNY），并给出按 cwd 的 top 分布；数据来自任务记录（含重启恢复）。用于回答「这批活花了多少」。费用为估算值，仅供参考。',
+    inputSchema: {
+      days: z.number().int().min(1).max(90).optional().describe('统计最近多少天，默认 1'),
+      cwd: z.string().optional().describe('只统计某个工作目录（可选）'),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async (args) => {
+      try {
+        const report = buildUsageReport(manager.list(), {
+          days: args.days ?? 1,
+          cwd: args.cwd ?? null,
+          pricing: config.pricing,
+        });
+        return ok({ ...report });
       } catch (error) {
         return fail(error);
       }

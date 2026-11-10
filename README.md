@@ -8,7 +8,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 单元测试 | ✅ 187/187 通过（`pnpm test`） |
+| 单元测试 | ✅ 216/217 通过（`pnpm test`；1 项 Windows-only 用例在 macOS/Linux 跳过） |
 | 真实链路烟测 | ✅ MCP Client → worker → 真实 DSH：问答 + 写文件（`hello-dsh.txt`）全链路通过 |
 | 长驻后端（M1） | ✅ 默认 `backend=sdk`：真实烟测首任务 9s（含一次初始化）、第二任务 **3s**；大仓库真实任务 18.4s（含 initialize）；`headless` 保留为 fallback |
 | 远程传输（M2a） | ✅ `DSH_MCP_TRANSPORT=http`：真实 HTTP 冒烟通过（`/healthz` 200、无 token 401、MCP HTTP 客户端跑真实任务 8s） |
@@ -28,7 +28,10 @@
 | worktree 根记忆与审批桥（v0.9.3） | ✅ worktree 根 ACL 不可用会被写入能力缓存（同 root 的后续任务直接跳过 worktree 尝试，复用 `DSH_MCP_CAPABILITY_TTL_H` TTL 后自动重试）；审批桥在 elicitation 不可用/用户拒绝时返回结构化 `approval.retry_args`（`permission_mode=danger-full-access` + `cwd` + `timeout_s`），leader 可直接重提 |
 | 仓库级并发与合入指引（v0.9.4） | ✅ 并发配额改为按 **git 仓库根** 计（同仓库不同子目录、worktree 任务也串行；非 git 目录回退按 cwd）；`dsh_result.worktree.base_commit` + `merge_hint`（`base_commit` / `patch_path` / 可直接执行的 `apply_command` / 审阅提示），worktree 改动可结构化合入原仓库（不自动 apply） |
 | 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
-| cwd 安全校验 | ✅ 传用户主目录会被拒绝（Windows ACL 沙箱限制） |
+| 用量与成本（v0.10.0，合并自本机在用版 bridge） | ✅ `dsh_usage` 按天/cwd 聚合任务数、状态分布、耗时、DSH token 与费用估算（`DSH_MCP_PRICE_*` 单价 / `DSH_MCP_USD_CNY` 汇率）；`dsh_result.usage.cost_usd/cost_cny`、`dsh_metrics.cost`；`dsh_result` 支持 `offset/max_chars` 分页续读 |
+| 幂等与防孤儿（v0.10.0，合并自本机在用版 bridge） | ✅ `dsh_run(idempotency_key)` 重复提交返回同一 task（落盘索引 + 进程内并发去重，默认 24h）；stdio 模式下父进程退出（stdin end/close）会终止运行中 worker，避免孤儿进程 |
+| macOS 适配（v0.10.0） | ✅ 非 Windows 允许主目录作为 cwd（Windows 保留 ACL 沙箱限制）、兼容旧配置 `DSH_MCP_ALLOWED_ROOTS`、默认超时 900→1800s、新增 `scripts/monitor-thread.py`（Codex thread 配额/token 监控） |
+| cwd 安全校验 | ✅ Windows 拒绝用户主目录（ACL 沙箱限制）；macOS/Linux 允许（v0.10.0 起，与在用版 bridge 对齐） |
 | Claude Code 接入 | ✅ 已注册（user scope）并实测连通：`claude mcp get dsh` → `√ Connected`；`claude -p` 真实调用 `dsh_describe` 成功 |
 | Codex 接入 | ✅ 已写入 `~/.codex/config.toml`，`codex mcp get dsh` 解析正常；**已实测真实调用**：ChatGPT/Codex 桌面 app（OpenAI.Codex 26.1103）17:54 按会话拉起 v0.9.1 worker，MCP initialize 返回 `serverInfo.version=0.9.1`、13/13 工具与白名单一致、approve 免打扰生效（13 次工具调用无弹窗） |
 | ChatGPT 桌面 app | ✅ 已实测：本机 ChatGPT 桌面入口即 **OpenAI.Codex 包**（`ChatGPT.exe` 是包内 shell，`codex.exe app-server` 拉起 worker），共享 `~/.codex/config.toml`；2026-11-10 真实委派任务（4a530bab）跑通 MCP 全链路（失败点是 D 盘 worktree 根 ACL，见 v0.9.2） |
@@ -61,9 +64,11 @@ dsh-mcp-worker（本进程）
 cd C:\path\to\dsh-mcp-worker
 pnpm install
 pnpm build
-pnpm test          # 161 个单测
+pnpm test          # 216 个单测（1 项 Windows-only 跳过）
 pnpm smoke         # 真实 DSH 集成烟测（约 30–60s）
 ```
+
+> macOS/Linux 同样适用：把 `cd C:\path\to\dsh-mcp-worker` 换成仓库路径即可。若本机 DSH 版本不支持 `--profile sdk`（如 `0.1.5-rc.2`），先设 `DSH_MCP_BACKEND=headless`（见下文「macOS / Linux + Codex 部署」）。
 
 worker 通过 **stdio** 工作，自身不监听任何端口。需要它时由 leader 拉起子进程。
 
@@ -87,6 +92,61 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
 - 升级：`pnpm update -g dsh-mcp-worker` → 重启 leader 会话；若入口路径变化，用 `scripts/mcp-entry.ps1` 刷新配置；
 - **不要用 `cmd /c dsh-mcp-worker` 作为 MCP 入口**：cmd 包装下 `dsh_describe` 正常但真实任务会卡住（已实测），必须用 `node` + 全局包入口；
 - 源码开发调试可选：`scripts/deploy.ps1` 部署到独立目录（内容等价 npm 包），不用于本机日常使用。
+## macOS / Linux + Codex 部署（从本机在用版 bridge 迁移）
+
+本仓库同时兼容 Windows 与 macOS/Linux。若你之前在生产用的是**零依赖单文件版 bridge**（`~/scripts/dsh-mcp/server.mjs`，v2.2.0，工具面 4 个：`dsh_dispatch` / `dsh_job` / `dsh_usage` / `dsh_status`），v0.10.0 已把它的核心能力合并进来：
+
+| 能力 | 在用版 server.mjs | 本仓库 v0.10.0 |
+|---|---|---|
+| 派活/等待/取消 | `dsh_dispatch` / `dsh_job` | `dsh_run` / `dsh_status` / `dsh_result` / `dsh_cancel`（另有批量、结构化证据、worktree、审批桥） |
+| 用量与成本 | `dsh_usage`（解析 dsh 会话日志） | `dsh_usage`（按天/cwd，基于任务记录）+ `dsh_result.usage.cost_*` + `dsh_metrics.cost` |
+| 幂等键 | `idempotency_key` | ✅ 同语义（落盘索引，默认 24h） |
+| 防孤儿进程 | stdin 关闭 → kill worker | ✅ stdio 模式已对齐 |
+| cwd 白名单 | `DSH_MCP_ALLOWED_ROOTS` | 兼容该变量；主变量仍是 `DSH_MCP_ALLOWED_CWDS` |
+| 默认超时 | 1800s | 1800s（v0.10.0 起；旧默认 900s 偏小） |
+| 输出续读 | 字节 `offset` / `max_bytes` | `dsh_result(offset, max_chars)` 字符分页 + `dsh_read_result` |
+
+**注意 DSH 版本**：本机 `dsh --version` 为 `0.1.5-rc.2` 时，长驻 `sdk` 后端（`dsh --profile sdk`）可能不可用。迁移时先设 `DSH_MCP_BACKEND=headless`（每任务一进程），或先用 `dsh --profile sdk --help` 验证本机支持。
+
+迁移步骤（保留在用版作为回滚）：
+
+1. 备份 Codex 配置：`cp ~/.codex/config.toml ~/.codex/config.toml.bak-before-dsh-mcp-worker`
+2. 构建本仓库：
+   ```bash
+   cd ~/workspace/code/github/dsh-mcp-worker
+   pnpm install && pnpm build
+   ```
+3. 把 `~/.codex/config.toml` 的 `[mcp_servers.dsh-worker]` 指到本仓库 `dist/index.js`，并补上 headless 与白名单（路径按本机替换）：
+   ```toml
+   [mcp_servers.dsh-worker]
+   command = "/Users/<you>/.nvm/versions/node/v24.19.0/bin/node"
+   args = ["/Users/<you>/.../dsh-mcp-worker/dist/index.js"]
+   cwd = "/Users/<you>"
+   enabled = true
+   startup_timeout_sec = 60
+   tool_timeout_sec = 1800
+   default_tools_approval_mode = "approve"
+
+   [mcp_servers.dsh-worker.env]
+   HOME = "/Users/<you>"
+   DSH_HOME = "/Users/<you>/.dsh"
+   DSH_MCP_BACKEND = "headless"
+   DSH_MCP_ALLOWED_ROOTS = "/Users/<you>"
+   DSH_MCP_MAX_CONCURRENT = "4"
+   PATH = "/Users/<you>/.nvm/versions/node/v24.19.0/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+   ```
+4. 重启 Codex / ChatGPT 桌面 app（MCP 工具目录在握手时协商），先在会话里调用 `dsh_describe` / `dsh_usage` 验证，再跑一个真实任务。
+   也可不挂载直接自检：
+   ```bash
+   printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    | DSH_MCP_BACKEND=headless node dist/index.js 2>/dev/null | tail -1 | head -c 400
+   ```
+5. 回滚：还原第 1 步的配置备份并重启 leader 即可。
+
+> 两版可并存对比（用不同的 MCP server 名）；它们的任务目录互不冲突（在用版 `~/.dsh-mcp/jobs` vs 本仓库 `$DSH_HOME/mcp-tasks`）。
+
 ## 通过 npm 使用
 
 包名：`dsh-mcp-worker`（只发布构建产物；本机仍需安装 DSH）。
@@ -131,7 +191,8 @@ claude mcp add --scope user --transport stdio --env DSH_MCP_DEFAULT_CWD="D:\work
 ```json
 ["mcp__dsh__dsh_run", "mcp__dsh__dsh_status", "mcp__dsh__dsh_result", "mcp__dsh__dsh_cancel", "mcp__dsh__dsh_describe",
  "mcp__dsh__dsh_tasks", "mcp__dsh__dsh_audit", "mcp__dsh__dsh_read_result", "mcp__dsh__dsh_batch_run",
- "mcp__dsh__dsh_batch_status", "mcp__dsh__dsh_batch_result", "mcp__dsh__dsh_search", "mcp__dsh__dsh_metrics"]
+ "mcp__dsh__dsh_batch_status", "mcp__dsh__dsh_batch_result", "mcp__dsh__dsh_search", "mcp__dsh__dsh_metrics",
+ "mcp__dsh__dsh_usage"]
 ```
 
 > 本机已写入（备份 `settings.json.bak-dsh-allow-20261102`）。安全边界仍由 worker 的 `permission_mode` / 审批桥承担。
@@ -146,21 +207,21 @@ command = "node"
 args = ["C:\\path\\to\\dsh-mcp-worker\\dist\\index.js"]
 startup_timeout_sec = 30          # 默认 10；worker 自身启动很快，留余量
 tool_timeout_sec = 300            # 默认 60；allow dsh_status 长轮询（wait_s≤120s）
-enabled_tools = ["dsh_run", "dsh_status", "dsh_result", "dsh_cancel", "dsh_describe", "dsh_tasks", "dsh_audit", "dsh_read_result", "dsh_batch_run", "dsh_batch_status", "dsh_batch_result", "dsh_search", "dsh_metrics"]
+enabled_tools = ["dsh_run", "dsh_status", "dsh_result", "dsh_cancel", "dsh_describe", "dsh_tasks", "dsh_audit", "dsh_read_result", "dsh_batch_run", "dsh_batch_status", "dsh_batch_result", "dsh_search", "dsh_metrics", "dsh_usage"]
 # approve = 不再询问（auto 仍会按风险询问）；安全边界由 worker 的 permission_mode（默认 workspace-write）兜底
 default_tools_approval_mode = "approve"
 
-# 桌面端对 MCP 工具的审批可被 per-tool 覆盖（13 个工具都要写）
+# 桌面端对 MCP 工具的审批可被 per-tool 覆盖（14 个工具都要写）
 [mcp_servers.dsh.tools.dsh_run]
 approval_mode = "approve"
 # ……其余工具同理：dsh_status / dsh_result / dsh_cancel / dsh_describe / dsh_tasks / dsh_audit /
-# dsh_read_result / dsh_batch_run / dsh_batch_status / dsh_batch_result / dsh_search / dsh_metrics
+# dsh_read_result / dsh_batch_run / dsh_batch_status / dsh_batch_result / dsh_search / dsh_metrics / dsh_usage
 
 [mcp_servers.dsh.env]
 DSH_MCP_DEFAULT_CWD = "C:\\path\\to\\your\\project"
 ```
 
-校验：`codex mcp get dsh`（本机已配置为 `default_tools_approval_mode: approve` + 13 个 per-tool `approve`；改前备份 `config.toml.bak-dsh-approve-20261102`）。改完需**完全退出并重开** Codex/ChatGPT 桌面 app，配置在 app 启动时加载。
+校验：`codex mcp get dsh`（本机已配置为 `default_tools_approval_mode: approve` + per-tool `approve`；改前备份 `config.toml.bak-dsh-approve-20261102`）。改完需**完全退出并重开** Codex/ChatGPT 桌面 app，配置在 app 启动时加载。
 
 ### 3) ChatGPT 桌面 app
 
@@ -188,9 +249,9 @@ ChatGPT web 只接受**远程 MCP**（Streamable HTTP / SSE），不接受 stdio
 
 | 工具 | 作用 | 关键参数 |
 |---|---|---|
-| `dsh_run` | 提交任务，**立即**返回 `task_id` | `task`（必填）、`cwd`（必填，项目目录）、`session_id?`、`permission_mode?`、`timeout_s?` |
+| `dsh_run` | 提交任务，**立即**返回 `task_id` | `task`（必填）、`cwd`（必填，项目目录）、`session_id?`、`permission_mode?`、`timeout_s?`、`idempotency_key?` |
 | `dsh_status` | 查状态 + 有界事件摘要；默认 `detail=summary` 只回状态/异常事件 + `last_text`，`detail=events` 回全部事件；终态带 `outcome` | `task_id`、`cursor?`、`wait_s?`、`detail?`（summary/events） |
-| `dsh_result` | 取最终结果；验收优先看 `evidence`（命令退出码/变更文件/diff 摘要）与 `outcome`，`output` 是 DSH 叙述 | `task_id` |
+| `dsh_result` | 取最终结果；验收优先看 `evidence`（命令退出码/变更文件/diff 摘要）与 `outcome`，`output` 是 DSH 叙述；传 `offset/max_chars` 可直接分页续读 | `task_id`、`offset?`、`max_chars?` |
 | `dsh_cancel` | 取消任务（杀进程树） | `task_id` |
 | `dsh_tasks` | 列出最近任务摘要（回顾/继续轮询） | `limit?`（1–100）、`status?` |
 | `dsh_audit` | 读取审计事件（任务生命周期/审批决定） | `limit?`（1–200） |
@@ -199,7 +260,8 @@ ChatGPT web 只接受**远程 MCP**（Streamable HTTP / SSE），不接受 stdio
 | `dsh_batch_status` | 批量聚合状态（整体状态 + 子任务 + 计数） | `batch_id`、`wait_s?` |
 | `dsh_batch_result` | 批量聚合结果（输出/错误/耗时） | `batch_id`、`max_output_chars?` |
 | `dsh_search` | 在历史任务的输出与工具结果里检索 | `query`、`limit?` |
-| `dsh_metrics` | 计数/耗时分位/排队/后端/OTel 状态 | — |
+| `dsh_metrics` | 计数/耗时分位/排队/后端/OTel 状态 + token 与估算费用汇总 | — |
+| `dsh_usage` | 按时间窗口聚合用量与费用（任务数/状态/耗时/DSH token/估算费用，按 cwd 分布） | `days?`（1–90）、`cwd?` |
 | `dsh_describe` | 返回入口/默认值/限制，供 leader 自适应 | — |
 
 典型调用序列（leader 视角）：
@@ -288,8 +350,9 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_SDK_INIT_TIMEOUT_S` | `300` | 后端 initialize 超时（秒）；失败自动重试 1 次，仍失败则自动降级 headless |
 | `DSH_MCP_DEFAULT_CWD` | 无 | 省略 `cwd` 时使用；没设则用 worker 进程 cwd（stdio 启动时通常是 leader 的项目目录） |
 | `DSH_MCP_ALLOWED_CWDS` | 无 | 分号分隔的允许目录白名单（设置后只能在这些目录下跑） |
+| `DSH_MCP_ALLOWED_ROOTS` | 无 | **兼容旧版 bridge** 的允许目录写法（平台分隔符：POSIX `:`、Windows `;`）；`DSH_MCP_ALLOWED_CWDS` 优先 |
 | `DSH_MCP_PERMISSION_MODE` | `auto` | 默认 `auto`（worker 按 cwd 能力自动适配）；也可显式 `read-only` / `workspace-write` / `danger-full-access` |
-| `DSH_MCP_TIMEOUT_S` | `900` | 单任务默认超时（秒） |
+| `DSH_MCP_TIMEOUT_S` | `1800` | 单任务默认超时（秒）；旧默认 900s 实测偏小（v0.10.0 起改 1800） |
 | `DSH_MCP_MAX_CONCURRENT` | `2` | 全局并发任务上限（1–8，另受同 session 串行约束） |
 | `DSH_MCP_MAX_CONCURRENT_PER_CWD` | `1` | 同一 **git 仓库根**（含子目录/worktree 任务）的并发上限；非 git 目录回退按 cwd 计（防止单项目占满） |
 | `DSH_MCP_TASK_TTL_MIN` | `1440` | 已结束任务保留分钟数，超时自动清理 |
@@ -316,6 +379,12 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_NOTIFY_WEBHOOK` | 无 | 任务结束 POST 通知（JSON） |
 | `DSH_MCP_NOTIFY_CMD` | 无 | 任务结束执行命令（`DSH_MCP_NOTIFY_JSON` 环境变量传事件） |
 | `DSH_MCP_MAX_RESULT_CHARS` | `40000` | 结果超长时落盘阈值 |
+| `DSH_MCP_IDEM_TTL_H` | `24` | 幂等键有效期（小时，0 = 永不过期）；`dsh_run(idempotency_key)` 重试去重 |
+| `DSH_MCP_IDEM_DIR` | `$DSH_HOME/mcp-idem` | 幂等键索引落盘目录 |
+| `DSH_MCP_PRICE_INPUT_PER_MTOK` | `0.28` | 费用估算：输入 token 单价（美元/百万 token） |
+| `DSH_MCP_PRICE_CACHE_READ_PER_MTOK` | `0.028` | 费用估算：cacheRead 单价（美元/百万 token） |
+| `DSH_MCP_PRICE_OUTPUT_PER_MTOK` | `0.42` | 费用估算：输出 token 单价（美元/百万 token） |
+| `DSH_MCP_USD_CNY` | `6.65` | 费用估算展示用美元兑人民币汇率 |
 | `DSH_MCP_MAX_STATUS_EVENTS` | `100` | 单次 `dsh_status` 最多返回多少条事件（仍受字节预算限制） |
 | `DSH_MCP_MAX_STATUS_PAYLOAD_BYTES` | `16384` | 单次 `dsh_status` 结构化载荷（JSON）的 UTF-8 字节上限；超出时只返回能放下的摘要并标记 `events_truncated` |
 | `DSH_MCP_EVIDENCE_GIT` | `1` | 是否采集 git 证据（status/diff 摘要 + diff.patch）；置 0 关闭 |
@@ -332,9 +401,11 @@ pnpm measure:leader -- --since-hours 24
 
 ```
 $DSH_HOME/mcp-tasks/<task_id>/
-  meta.json      状态、cwd、session、退出码、错误
+  meta.json      状态、cwd、session、退出码、错误（含 usageTokens 与幂等键）
   events.jsonl   DSH --json 事件流（追加写）
   result.txt     输出超长时的完整结果
+$DSH_HOME/mcp-idem/
+  idem-<key-hash>.json   幂等键 → task_id 索引（默认保留 24h）
 ```
 
 审计日志（append-only，独立于任务目录）：`$DSH_HOME/mcp-audit/audit.jsonl`，记录 `task_created` / `task_started` / `task_succeeded|failed|cancelled` / `approval_*`；可用 `dsh_audit` 查询。
@@ -400,7 +471,7 @@ worker 重启时，未完成的 `queued/running` 任务会被标记为 `failed`�
 ```
 src/
   index.ts         stdio 入口（生产环境装配）
-  server.ts        MCP 工具注册（13 个工具 + instructions）
+  server.ts        MCP 工具注册（14 个工具 + instructions）
   task-manager.ts  异步任务：排队/并发/session 串行/每仓库配额/TTL 清理/状态机/长轮询/恢复/审计
   dsh-runner.ts    headless 后端：spawn dsh、NDJSON 解析、超时、杀进程树、stderr 尾部
   sdk-backend.ts   sdk 后端：长驻进程、initialize、prompt、session.event 映射、取消=杀进程
@@ -419,15 +490,18 @@ src/
   search.ts        历史任务内容检索（输出 + 工具结果）
   otel.ts          轻量 OTLP/HTTP span 导出（无 SDK 依赖）
   usage.ts         DSH token 用量提取/累加（headless step_end 与 sdk assistant/message）
+  pricing.ts       DeepSeek 单价与费用估算（USD/CNY，v0.10.0 合并自在用版 bridge）
+  usage-report.ts  用量/成本聚合（dsh_usage 工具，按天/按 cwd）
+  idempotency.ts   幂等键落盘索引（dsh_run idempotency_key 去重）
   dsh-patch.ts     DSH 兼容补丁：启动时检测/修复 pwsh 编码前缀（apply/notify/off）
   ndjson.ts        NDJSON 解析（跨 chunk/CRLF/脏行）
   output.ts        输出落盘与摘要
   keyed-lock.ts    session 级串行锁
   config.ts        环境变量、DSH 入口探测、cwd 校验
   store.ts         meta.json / events.jsonl 落盘
-test/              161 个单测 + 真实 DSH 烟测（`test/mcp-smoke.ts`、`test/http-smoke.ts`）
+test/              216 个单测 + 真实 DSH 烟测（`test/mcp-smoke.ts`、`test/http-smoke.ts`）
 examples/          多端接入示例（Claude / Codex / MCPB / 远程接入）
-scripts/           部署与运维：deploy.ps1（源码→运行目录）/ patch-dsh-pwsh-encoding / patch-dsh-output-decoding / measure-goals / leader-usage
+scripts/           部署与运维：deploy.ps1（源码→运行目录）/ patch-dsh-pwsh-encoding / patch-dsh-output-decoding / measure-goals / leader-usage / monitor-thread.py（Codex thread 配额/token 监控，兼容两版任务落盘）
 docs/              measurement.md（目标口径/公式/A/B 协议/局限）、delegation-playbook.md（委派粒度与任务模板）
 ```
 
@@ -440,7 +514,7 @@ pnpm measure:leader# 扫描 leader 会话用量（Claude transcripts + Codex rol
 pnpm build         # tsc 产物到 dist/
 ```
 
-测试覆盖：NDJSON 解析/截断、输出落盘、session 锁、dsh 进程超时与取消、任务管理器（并发/每仓库配额/session 串行/长轮询/恢复/取消/TTL 清理/数量上限/审计）、JSON-RPC 客户端、SDK 长驻后端与池、HTTP 传输（鉴权/healthz）、审批桥、新增只读工具、DSH token 用量提取与累加、DSH 兼容补丁（编码前缀 + GBK 兜底解码；apply/notify/off/幂等/版本漂移）。
+测试覆盖：NDJSON 解析/截断、输出落盘、session 锁、dsh 进程超时与取消、任务管理器（并发/每仓库配额/session 串行/长轮询/恢复/取消/TTL 清理/数量上限/审计）、JSON-RPC 客户端、SDK 长驻后端与池、HTTP 传输（鉴权/healthz）、审批桥、新增只读工具、DSH token 用量提取与累加、DSH 兼容补丁（编码前缀 + GBK 兜底解码；apply/notify/off/幂等/版本漂移）。v0.10.0 追加：费用估算（单价/汇率）、`dsh_usage` 聚合、幂等键（落盘命中/TTL/forget/prune）、`dsh_result` 分页、配置合并项（默认 1800s、`DSH_MCP_ALLOWED_ROOTS` 兼容、单价覆盖）。
 
 ## 发布到 npm（维护者）
 
@@ -480,6 +554,7 @@ License：MIT（见 [LICENSE](LICENSE)）。
 - **M3 ✅ 已完成（2026-11-02）**：任务 TTL 清理 + 数量上限、每 cwd 并发配额（v0.9.4 起按 git 仓库根）、审计日志（`dsh_audit`）、`dsh_tasks`、`dsh_read_result`。
 - **M4 ✅ 已完成（2026-11-02）**：批量派发（fan-out）/ 历史任务检索 / 指标快照 / 轻量 OTel span 导出。
 - **M5 ✅ 已完成（2026-11-02）**：目标达成率测量——worker 侧 DSH token 计量、A/B 对照工具、leader 用量扫描器、口径文档。
+- **M6 ✅ 已完成（2026-11-11，v0.10.0）**：合并本机 Codex 在用版 bridge（`server.mjs` v2.2.0）的能力——`dsh_usage` 用量/成本、幂等键、stdin 防孤儿、macOS cwd 适配、`dsh_result` 分页续读、`scripts/monitor-thread.py`。
 
 > 设计依据与市场调研见 `本机分析报告（未随仓库提供）`。
 

@@ -1,8 +1,9 @@
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { delimiter, join, resolve, sep } from 'node:path';
 import { WorkerError } from './errors.js';
 import type { DshPatchMode } from './dsh-patch.js';
+import { DEFAULT_PRICING, type PricingConfig } from './pricing.js';
 
 export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
@@ -118,20 +119,33 @@ export interface WorkerConfig {
   reportProtocol: boolean;
   /** dsh_status 默认 detail：summary（仅状态/异常）或 events（旧行为）。 */
   statusDetail: 'summary' | 'events';
+  /** DeepSeek 单价与人民币汇率（仅用于费用估算展示）。 */
+  pricing: PricingConfig;
+  /** 幂等键有效期（毫秒）；0 = 永不自动过期。 */
+  idemTtlMs: number;
+  /** 幂等键索引落盘目录。 */
+  idemDir: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const dshHome = resolve(env.DSH_HOME?.trim() || join(homedir(), '.dsh'));
   const permissionMode = parsePermissionMode(env.DSH_MCP_PERMISSION_MODE);
-  const allowedCwds = (env.DSH_MCP_ALLOWED_CWDS ?? '')
-    .split(';')
+  // 允许列表两种写法：新配置 DSH_MCP_ALLOWED_CWDS（`;` 分隔）优先；
+  // 兼容本机在用版 bridge 的 DSH_MCP_ALLOWED_ROOTS（按平台分隔符，POSIX `:` / Windows `;`）。
+  const allowedCwdsRaw = env.DSH_MCP_ALLOWED_CWDS?.trim()
+    ? { raw: env.DSH_MCP_ALLOWED_CWDS, sep: ';' }
+    : env.DSH_MCP_ALLOWED_ROOTS?.trim()
+      ? { raw: env.DSH_MCP_ALLOWED_ROOTS, sep: delimiter }
+      : undefined;
+  const allowedCwds = (allowedCwdsRaw?.raw ?? '')
+    .split(allowedCwdsRaw?.sep ?? ';')
     .map((part) => part.trim())
     .filter((part) => part.length > 0)
     .map((part) => resolve(part));
 
   return {
     name: 'dsh-mcp-worker',
-    version: '0.9.4',
+    version: '0.10.0',
     backend: env.DSH_MCP_BACKEND?.trim() === 'headless' ? 'headless' : 'sdk',
     transport: env.DSH_MCP_TRANSPORT?.trim() === 'http' ? 'http' : 'stdio',
     http: {
@@ -159,7 +173,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     defaultCwd: env.DSH_MCP_DEFAULT_CWD?.trim() ? resolve(env.DSH_MCP_DEFAULT_CWD.trim()) : undefined,
     allowedCwds,
     defaultPermissionMode: permissionMode,
-    defaultTimeoutMs: readInt(env, 'DSH_MCP_TIMEOUT_S', 900, 5, 86_400) * 1000,
+    // 默认 1800s：本机在用版实测 900s 偏小（多个 900–1800s 任务被误杀）。
+    defaultTimeoutMs: readInt(env, 'DSH_MCP_TIMEOUT_S', 1_800, 5, 86_400) * 1000,
     maxConcurrent: readInt(env, 'DSH_MCP_MAX_CONCURRENT', 2, 1, 8),
     maxConcurrentPerCwd: readInt(env, 'DSH_MCP_MAX_CONCURRENT_PER_CWD', 1, 1, 8),
     capabilityStore: readBool(env, 'DSH_MCP_CAPABILITY_CACHE', true),
@@ -191,6 +206,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     evidenceGit: readBool(env, 'DSH_MCP_EVIDENCE_GIT', true),
     reportProtocol: readBool(env, 'DSH_MCP_REPORT_PROTOCOL', true),
     statusDetail: parseStatusDetail(env.DSH_MCP_STATUS_DETAIL),
+    pricing: {
+      inputPerMTok: readNumber(env, 'DSH_MCP_PRICE_INPUT_PER_MTOK', DEFAULT_PRICING.inputPerMTok),
+      cacheReadPerMTok: readNumber(env, 'DSH_MCP_PRICE_CACHE_READ_PER_MTOK', DEFAULT_PRICING.cacheReadPerMTok),
+      outputPerMTok: readNumber(env, 'DSH_MCP_PRICE_OUTPUT_PER_MTOK', DEFAULT_PRICING.outputPerMTok),
+      usdCny: readNumber(env, 'DSH_MCP_USD_CNY', DEFAULT_PRICING.usdCny),
+    },
+    idemTtlMs: readInt(env, 'DSH_MCP_IDEM_TTL_H', 24, 0, 8_760) * 3_600_000,
+    idemDir: resolve(env.DSH_MCP_IDEM_DIR?.trim() || join(dshHome, 'mcp-idem')),
   };
 }
 
@@ -237,13 +260,15 @@ export function validateCwd(input: string, config: WorkerConfig): string {
   }
 
   const home = resolve(homedir());
-  if (samePath(resolved, home)) {
+  // Windows 沙箱下 temp 根会落在工作区内，导致 shell 工具不可用，所以拒绝主目录与其祖先；
+  // macOS/Linux 无此限制（本机在用版 bridge 一直允许 home 作为 cwd，合并时对齐平台差异）。
+  if (process.platform === 'win32' && samePath(resolved, home)) {
     throw new WorkerError(
       'invalid_cwd',
       `cwd 不能是用户主目录（${home}）：Windows 沙箱下 temp 根会落在工作区内，导致 shell 工具不可用。请传入具体项目目录。`,
     );
   }
-  if (samePath(home, resolved) === false && isUnderRoot(home, resolved)) {
+  if (process.platform === 'win32' && samePath(home, resolved) === false && isUnderRoot(home, resolved)) {
     throw new WorkerError('invalid_cwd', `cwd 不能是用户主目录的祖先目录（${resolved}），请传入具体项目目录。`);
   }
 
@@ -300,6 +325,15 @@ function readOptionalInt(env: NodeJS.ProcessEnv, key: string): number | undefine
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
   return Math.trunc(parsed);
+}
+
+/** 读取非负浮点数（单价/汇率这类允许小数的配置）。 */
+function readNumber(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
 }
 
 export function isUnderRoot(child: string, root: string): boolean {

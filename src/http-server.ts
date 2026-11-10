@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { AuditLog } from './audit.js';
 import type { BatchManager } from './batch-manager.js';
 import type { WorkerConfig } from './config.js';
+import type { IdempotencyStore } from './idempotency.js';
 import { createWorkerServer } from './server.js';
 import type { TaskManager } from './task-manager.js';
 
@@ -13,6 +14,8 @@ export interface HttpServerDeps {
   audit?: AuditLog;
   batches?: BatchManager;
   runtimeInfo?: () => Record<string, unknown>;
+  /** 幂等键索引（HTTP 模式各请求共享同一份落盘索引）。 */
+  idem?: IdempotencyStore;
 }
 
 export interface RunningHttpServer {
@@ -126,6 +129,7 @@ async function handleRequest(deps: HttpServerDeps, req: IncomingMessage, res: Se
     ...(deps.audit ? { audit: deps.audit } : {}),
     ...(deps.batches ? { batches: deps.batches } : {}),
     ...(deps.runtimeInfo ? { runtimeInfo: deps.runtimeInfo } : {}),
+    ...(deps.idem ? { idem: deps.idem } : {}),
   });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   try {

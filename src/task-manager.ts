@@ -34,6 +34,7 @@ import {
   textLooksLikeSandboxAclFailure,
 } from './sandbox-errors.js';
 import { addTokenUsage, emptyTokenUsage, extractTokenUsage } from './usage.js';
+import { estimateCost } from './pricing.js';
 import { EVENT_SUMMARY_MAX_BYTES, sliceJsonString, summarizeEvent, utf8ByteLength } from './event-summary.js';
 
 export interface TaskRunInput {
@@ -64,6 +65,8 @@ export interface TaskCreateInput {
   sessionId?: string;
   permissionMode?: string;
   timeoutMs?: number;
+  /** 幂等键（可选）：由 server 层去重后透传，落进任务记录便于追溯。 */
+  idempotencyKey?: string;
 }
 
 export interface TaskCreateHooks {
@@ -199,6 +202,7 @@ export class TaskManager {
       createdAt: this.now(),
       workerPid: process.pid,
       ...(repoRoot ? { repoRoot } : {}),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       events: [],
       timedOut: false,
     };
@@ -395,6 +399,7 @@ export class TaskManager {
       throw new WorkerError('task_not_finished', `任务尚未结束（当前 ${record.status}），请先用 dsh_status 轮询`);
     }
     const evidence = await this.readEvidence(record.id);
+    const cost = estimateCost(record.usageTokens, this.options.config.pricing);
     return {
       task_id: record.id,
       status: record.status,
@@ -423,6 +428,8 @@ export class TaskManager {
         tool_calls: record.events.filter((event) => event.type === 'tool_call').length,
         wall_ms: record.startedAt !== undefined && record.endedAt !== undefined ? record.endedAt - record.startedAt : null,
         tokens: record.usageTokens ?? null,
+        cost_usd: cost?.usd ?? null,
+        cost_cny: cost?.cny ?? null,
       },
     };
   }

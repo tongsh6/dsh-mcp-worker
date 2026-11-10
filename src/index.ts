@@ -7,6 +7,7 @@ import { ensureDshCompatPatches } from './dsh-patch.js';
 import { startDshRun } from './dsh-runner.js';
 import { createFallbackRunner } from './fallback-runner.js';
 import { startHttpServer, type RunningHttpServer } from './http-server.js';
+import { IdempotencyStore } from './idempotency.js';
 import { OtelSpanExporter } from './otel.js';
 import { Notifier } from './notifier.js';
 import { createWorkerServer } from './server.js';
@@ -109,17 +110,23 @@ await manager.init();
 const batches = new BatchManager(manager, config.batchDir, config.maxBatchTasks);
 await batches.init();
 
+// 幂等键索引：跨重启保留 24h（DSH_MCP_IDEM_TTL_H），leader 重试不会重复派活。
+const idem = new IdempotencyStore(config.idemDir, config.idemTtlMs);
+await idem.init();
+const prunedIdem = await idem.prune().catch(() => 0);
+if (prunedIdem > 0) log(`清理过期幂等索引 ${prunedIdem} 个`);
+
 let mcpServer: ReturnType<typeof createWorkerServer> | undefined;
 let httpServer: RunningHttpServer | undefined;
 
 if (config.transport === 'http') {
-  httpServer = await startHttpServer({ manager, config, audit, batches, runtimeInfo });
+  httpServer = await startHttpServer({ manager, config, audit, batches, runtimeInfo, idem });
   log(`传输=HTTP（无状态 Streamable HTTP）：${httpServer.url}`);
   log(
     `鉴权=${config.http.token ? 'Bearer（已启用）' : '无（仅回环地址可用）'}；健康检查=${httpServer.url.replace(/\/mcp$/, '')}/healthz`,
   );
 } else {
-  mcpServer = createWorkerServer({ manager, config, audit, batches, runtimeInfo });
+  mcpServer = createWorkerServer({ manager, config, audit, batches, runtimeInfo, idem });
   await mcpServer.connect(new StdioServerTransport());
   log('传输=stdio');
 }
@@ -143,6 +150,10 @@ log(
 log(
   `任务保留=${Math.round(config.taskTtlMs / 60_000)}min / 上限 ${config.maxTasks} 个；审计日志=${audit.filePath}`,
 );
+log(
+  `幂等索引=${config.idemDir}（TTL ${Math.round(config.idemTtlMs / 3_600_000)}h）；费用单价 in/cacheRead/out=` +
+    `$${config.pricing.inputPerMTok}/$${config.pricing.cacheReadPerMTok}/$${config.pricing.outputPerMTok} per Mtok，汇率=${config.pricing.usdCny}`,
+);
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -165,6 +176,12 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
+// stdio 传输：父进程（leader）退出时 stdin 会关闭，此时终止运行中的 worker，避免留下孤儿进程。
+// 合并自本机 Codex 在用的 dsh-mcp bridge v2.2.0（stdin end/close → kill 进程组）。
+if (config.transport !== 'http') {
+  process.stdin.on('end', () => void shutdown('stdin 已关闭'));
+  process.stdin.on('close', () => void shutdown('stdin 已关闭'));
+}
 process.on('unhandledRejection', (reason) => {
   log(`unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}`);
 });

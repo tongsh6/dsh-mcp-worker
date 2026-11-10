@@ -151,6 +151,14 @@ export function makeTestConfig(overrides: Partial<WorkerConfig> = {}): WorkerCon
     evidenceGit: false,
     reportProtocol: false,
     statusDetail: 'events',
+    pricing: {
+      inputPerMTok: 0.28,
+      cacheReadPerMTok: 0.028,
+      outputPerMTok: 0.42,
+      usdCny: 6.65,
+    },
+    idemTtlMs: 24 * 60 * 60 * 1000,
+    idemDir: 'test-idem',
     ...overrides,
   };
 }
