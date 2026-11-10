@@ -8,7 +8,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 单元测试 | ✅ 161/161 通过（`pnpm test`） |
+| 单元测试 | ✅ 174/174 通过（`pnpm test`） |
 | 真实链路烟测 | ✅ MCP Client → worker → 真实 DSH：问答 + 写文件（`hello-dsh.txt`）全链路通过 |
 | 长驻后端（M1） | ✅ 默认 `backend=sdk`：真实烟测首任务 9s（含一次初始化）、第二任务 **3s**；大仓库真实任务 18.4s（含 initialize）；`headless` 保留为 fallback |
 | 远程传输（M2a） | ✅ `DSH_MCP_TRANSPORT=http`：真实 HTTP 冒烟通过（`/healthz` 200、无 token 401、MCP HTTP 客户端跑真实任务 8s） |
@@ -16,17 +16,20 @@
 | 运维治理（M3） | ✅ 任务 TTL 自动清理 + 数量上限（超额淘汰最老已结束任务）、每 cwd 并发配额、审计日志（`dsh_audit`）、任务列表（`dsh_tasks`）、完整产物分页读取（`dsh_read_result`） |
 | 批量/检索/观测（M4） | ✅ `dsh_batch_run/status/result` 批量派发与聚合、`dsh_search` 历史任务内容检索、`dsh_metrics` 指标快照、轻量 OTel span 导出（真实冒烟捕获到 2 条 `dsh.task` span） |
 | 编码与写文件 | ✅ workspace-write 中文 UTF-8 写入/读回（字节 `E4 B8 AD…`）；read-only 中文输出经 worker **自动双层兼容修复**后回归正常（实测 read-only / workspace-write 均返回 `中文探针：你好`、无 `�`） |
-| Windows ACL 沙箱降级（v0.6.6） | ✅ 公司仓库等「仅 Modify ACL」目录请求 workspace-write 时会遇 `SetNamedSecurityInfoW failed (Win32 5): grantWrite`；worker 检测后自动升级为 **danger-full-access + 新 session** 重试，`dsh_result.sandbox_fallback` / `effective_permission_mode` 记录实际模式（真实受限仓库验证：succeeded、output=ok、30s）；可用 `DSH_MCP_ACL_FALLBACK=read-only` 或 `off` 收紧 |
+| Windows ACL 沙箱降级（v0.6.6 → v0.9.2） | ✅ 公司仓库等「仅 Modify ACL」目录请求 workspace-write 时会遇 `SetNamedSecurityInfoW failed (Win32 5): grantWrite`；worker 按 **worktree（workspace-write）→ danger-full-access** 两级兜底，`dsh_result.sandbox_fallback`/`effective_permission_mode` 记录实际模式。v0.9.2 起：① 首条 ACL 失败 **fail-fast** 立即中止 attempt；② worktree 再失败会**二次升级** full；③ `attempts`/`sandbox_blocked` 完整归因；④ `DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK=0` 可禁止自动全权。**worktree 根目录同样必须「完全控制」**（默认 `~/dsh-worktrees` 满足；改到 D 盘受限目录会失效） |
 | 委派粒度策略（v0.6.4） | ✅ 规则改为「一个 dsh_run = 一个可验收工作单元（实现+自测+证据），禁止微任务」；长轮询上限 25s→可配 120s（`DSH_MCP_STATUS_WAIT_MAX_S`），减少 leader 往返；规则已写入 `~/AGENTS.md`、`~/.codex/AGENTS.md`、worker instructions 与 [docs/delegation-playbook.md](docs/delegation-playbook.md) |
 | 执行记录分析（v0.6.5） | ✅ 分析 11-02~11-09 的 64 个任务/200 条审计：修复「长任务被空闲回收误杀」（11 分钟任务、13.3M token 沉没）与「read-only 任务被 ACL 文本误判 failed」；新增 `dsh_status` 实时 `tokens/steps/tool_calls`、`dsh_result.partial_output/failure_kind`、token 预算护栏 `DSH_MCP_MAX_TASK_TOKENS`、ACL 失败 cwd 缓存（报告见 `D:\work\tmp\dsh-record-analysis\DSH-MCP执行记录分析-2026-11-09.md`） |
 | 续聊恢复（v0.6.3） | ✅ DSH SDK 协议无 resume；worker 重建后用旧 `session_id` 续聊会报 `session "..." already exists`。worker 自动换新 session id 重试，并把上一轮任务/结果摘要作为「续聊上下文」拼入；真实两进程验证：A 建 session → B 续聊 succeeded（output=ok2），事件含 `session_resume_fallback` |
 | 易用性升级（v0.7.0） | ✅ `auto` 模式 + cwd 能力缓存（跨进程，避免每次撞 ACL）+ 自动 worktree（受限仓库改到可写 worktree）+ 能力缓存 TTL 可调 + 瞬态失败自动重试 + 失败诊断 + `dsh_run(wait_s)` 单调用等待 + MCP 调用/字节指标 + 任务完成 webhook/命令通知 |
 | 性能与协议（v0.8.0） | ✅ `dsh_status` 有界事件摘要（单条 ≤2KiB、单次 ≤16KiB，可配）、`session_id` 实时回填与别名锁、事件追加串行化（避免并发写坏 JSONL）、auto 模式优先 worktree |
-| 结构化证据（v0.9.0） | ✅ `dsh_result.evidence`（命令+退出码/编辑/git 变更+diff）与 `outcome`（completed/needs_decision/failed/cancelled）；`[DSH:NEEDS_DECISION]` 决策协议；`dsh_status` 默认 `detail=summary`；`dsh_read_result(source=diff|evidence)`；`dsh_metrics.outcomes/rework/evidence` || 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
+| 结构化证据（v0.9.0） | ✅ `dsh_result.evidence`（命令+退出码/编辑/git 变更+diff）与 `outcome`（completed/needs_decision/failed/cancelled）；`[DSH:NEEDS_DECISION]` 决策协议；`dsh_status` 默认 `detail=summary`；`dsh_read_result(source=diff|evidence)`；`dsh_metrics.outcomes/rework/evidence` |
+| 证据补全（v0.9.1） | ✅ `evidence.edits` 支持真实 DSH 的 `write`/`edit`/`apply_patch` 与 `file_path`；untracked 文件渲染进 `diff.patch`（`new file` + `+ untracked: N files`） |
+| worktree 安全与归因（v0.9.2） | ✅ ACL fail-fast（首条命令 ACL 失败立即中止 attempt，不再空转烧 token）；worktree 重试失败后**二次升级** danger-full-access；`dsh_result.attempts`（逐次尝试+首次决策文本）、`sandbox_blocked`/`sandbox_blocked_detail` 结构化归因；取消/失败不再丢 ACL 归因，也不会「命令全失败却 succeeded」；worktree 按 TTL 自动 `git worktree remove/prune` 清理 |
+| 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
 | cwd 安全校验 | ✅ 传用户主目录会被拒绝（Windows ACL 沙箱限制） |
 | Claude Code 接入 | ✅ 已注册（user scope）并实测连通：`claude mcp get dsh` → `√ Connected`；`claude -p` 真实调用 `dsh_describe` 成功 |
-| Codex 接入 | ✅ 已写入 `~/.codex/config.toml`，`codex mcp get dsh` 解析正常（工具白名单/超时/审批模式生效；未做真实调用） |
-| ChatGPT 桌面 app | ⚠️ 未实测（调研显示它与 Codex 共享 `~/.codex/config.toml`，配法同 Codex） |
+| Codex 接入 | ✅ 已写入 `~/.codex/config.toml`，`codex mcp get dsh` 解析正常；**已实测真实调用**：ChatGPT/Codex 桌面 app（OpenAI.Codex 26.1103）17:54 按会话拉起 v0.9.1 worker，MCP initialize 返回 `serverInfo.version=0.9.1`、13/13 工具与白名单一致、approve 免打扰生效（13 次工具调用无弹窗） |
+| ChatGPT 桌面 app | ✅ 已实测：本机 ChatGPT 桌面入口即 **OpenAI.Codex 包**（`ChatGPT.exe` 是包内 shell，`codex.exe app-server` 拉起 worker），共享 `~/.codex/config.toml`；2026-11-10 真实委派任务（4a530bab）跑通 MCP 全链路（失败点是 D 盘 worktree 根 ACL，见 v0.9.2） |
 | ChatGPT web | ⏸ 后置（需要 OpenAI Secure MCP Tunnel 或自建 HTTPS + OAuth） |
 | Claude Desktop（MCPB） | ⚠️ 未实测（`examples/mcpb-manifest.json` 已给出模板） |
 
@@ -296,14 +299,18 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_OTEL_ENDPOINT` | 无 | OTLP/HTTP traces 端点（如 `http://127.0.0.1:4318/v1/traces`）；空 = 关闭 |
 | `DSH_MCP_OTEL_SERVICE` | `dsh-mcp-worker` | OTel `service.name` |
 | `DSH_MCP_DSH_PATCH` | `apply` | DSH 兼容补丁：`apply`（启动时自动检测+修复①pwsh 编码前缀 ②输出 GBK 兜底解码）/ `notify` / `off` |
-| `DSH_MCP_ACL_FALLBACK` | `danger-full-access` | workspace-write 沙箱 ACL 授权失败时的自动升级策略：`danger-full-access`（默认，B 方案：升级为全权重试）/ `read-only`（只读重试）/ `off`（直接失败并给修法）。注意 full access 无沙箱 |
+| `DSH_MCP_ACL_FALLBACK` | `danger-full-access` | workspace-write ACL 失败后的目标模式：`danger-full-access`（第二级升级）/ `read-only` / `off`。执行顺序固定为「原目录 workspace-write → worktree workspace-write → 目标模式」，每级失败都会重新判定 |
+| `DSH_MCP_ACL_FAIL_FAST` | `1` | 首条命令 ACL 失败即立即中止当前 attempt（不再等模型空转/长超时），进入降级决策 |
+| `DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK` | `1` | 是否允许自动升级 `danger-full-access`；**发布给他人使用建议设 `0`**（保持 fail-closed，由 leader 显式选择）；`read-only` 降级不受影响 |
 | `DSH_MCP_STATUS_WAIT_MAX_S` | `120` | `dsh_status` 单次长轮询等待上限（秒，5–600）；调大可减少 leader 轮询次数 |
 | `DSH_MCP_MAX_TASK_TOKENS` | `0` | **暂缓启用**：单任务 DSH token 预算，默认 `0`=不限制、不产生任何行为。实现已完成但按当前决定不开启；待积累 ≥20 条成功任务后，再按任务类型 p90×1.5 校准并启用（`totalTokens` 94–98% 是 cacheRead，若控成本需另按 input+output 折算） |
 | `DSH_MCP_CAPABILITY_CACHE` | `1` | cwd 能力缓存（落盘，auto 模式据此选权限模式），跨 worker 进程 |
 | `DSH_MCP_CAPABILITY_TTL_H` | `24` | cwd 能力缓存 TTL（小时） |
 | `DSH_MCP_RETRY_TRANSIENT` | `1` | 后端崩溃/初始化失败时自动重试一次 |
-| `DSH_MCP_AUTO_WORKTREE` | `1` | ACL 受限仓库自动创建可写 worktree（仅干净 git 仓库） |
-| `DSH_MCP_WORKTREE_ROOT` | `~/dsh-worktrees` | 自动 worktree 根目录 |
+| `DSH_MCP_AUTO_WORKTREE` | `1` | ACL 受限仓库自动创建可写 worktree（仅干净 git 仓库）。**worktree 根目录必须对当前用户完全控制**，否则 worktree 同样会 ACL 失败 |
+| `DSH_MCP_WORKTREE_ROOT` | `~/dsh-worktrees` | 自动 worktree 根目录；不要指向 ACL 受限的盘/目录（如企业仓库所在的受限 D 盘），默认的用户主目录满足 |
+| `DSH_MCP_WORKTREE_CLEANUP` | `1` | 终态任务过期后自动 `git worktree remove/prune`（不影响任务证据 `diff.patch`） |
+| `DSH_MCP_WORKTREE_TTL_MIN` | `1440` | worktree 保留时长（分钟），超时由清理任务移除 |
 | `DSH_MCP_NOTIFY_WEBHOOK` | 无 | 任务结束 POST 通知（JSON） |
 | `DSH_MCP_NOTIFY_CMD` | 无 | 任务结束执行命令（`DSH_MCP_NOTIFY_JSON` 环境变量传事件） |
 | `DSH_MCP_MAX_RESULT_CHARS` | `40000` | 结果超长时落盘阈值 |
@@ -353,7 +360,7 @@ worker 重启时，未完成的 `queued/running` 任务会被标记为 `failed`�
 9. **任务会被自动清理**：超过 `DSH_MCP_TASK_TTL_MIN` 的已结束任务（含落盘目录）会被删除，之后查询返回 `task_not_found`。
 10. **授权弹窗由 leader 侧配置决定**：Codex/ChatGPT 的「不询问」值是 **`approve`**（`auto` 仍会按风险询问；`writes` 只对写工具询问；`prompt` 全问），建议 `default_tools_approval_mode = "approve"` + 每个工具的 `[mcp_servers.dsh.tools.<tool>] approval_mode = "approve"`，并**完全退出重开 app**；Claude Code 用 `permissions.allow`。桌面端另有已知 bug（openai/codex#40793、#20289：部分版本线程内仍每次询问、忽略 approval_mode），遇到底座 bug 只能点「始终允许」、升级 app 或改用 Claude Code/CLI。关闭逐次确认后安全边界由 worker 的 `permission_mode`（默认 workspace-write）与审批桥 fail-closed 兜底。
 11. **initialize 偶发卡顿**：initialize 正常 7–30s；曾出现 >120s 超时（旧默认值）导致任务失败，现已改为 300s + 重试 + headless 降级，并在错误里带 stderr 证据。
-12. **Windows ACL 沙箱要求目录为「完全控制」**：DSH 的 workspace-write 会给工作目录写能力 SID + Low 标签，要求调用方对目录拥有完全控制（含 WRITE_OWNER）；公司仓库常见继承 ACL 只有 Modify → `SetNamedSecurityInfoW failed (Win32 5)`。worker 默认按 **B 方案**：检测到该失败后自动升级 `danger-full-access` 重试（结果里 `sandbox_fallback` + `effective_permission_mode` 显式记录，不掩盖）；可用 `DSH_MCP_ACL_FALLBACK=read-only|off` 收紧。
+12. **Windows ACL 沙箱要求目录为「完全控制」**：DSH 的 workspace-write 会给工作目录写能力 SID + Low 标签，要求调用方对目录拥有完全控制（含 WRITE_OWNER）；公司仓库常见继承 ACL 只有 Modify → `SetNamedSecurityInfoW failed (Win32 5)`。v0.9.2 起降级链为「原目录 workspace-write → worktree workspace-write → `DSH_MCP_ACL_FALLBACK`」：首条 ACL 失败即 **fail-fast** 中止，worktree 再失败会 **二次升级**；结果里 `attempts` / `sandbox_blocked(_detail)` / `sandbox_fallback` / `effective_permission_mode` 显式记录，绝不静默假成功。**worktree 根目录本身也必须完全控制**（2026-11-10 真实任务因 `D:\work\worktrees\dsh` 只有 Modify 而空转，已由 fail-fast + 二次升级修复）；可用 `DSH_MCP_ACL_FALLBACK=read-only|off` 收紧。
 13. **自动升级的 full access 无沙箱**：任务在 `danger-full-access` 下可读写当前用户能访问的任意路径；这是为「调用简单」有意选择的 B 方案，请配合 `DSH_MCP_ALLOWED_CWDS` 限定目录、审计日志与 git 回滚使用；高敏感仓库建议用 `read-only` 或 `off`。
 10. **审计日志无轮转**：`audit.jsonl` 持续追加，长期使用需自行归档/切割。
 11. **ChatGPT 直连未打通**：需要 Secure MCP Tunnel（无配额未实测）或自建 HTTPS + OAuth 2.1（OAuth 未实现）；本地 HTTP + Bearer 给不了 ChatGPT。
@@ -366,8 +373,9 @@ worker 重启时，未完成的 `queued/running` 任务会被标记为 `failed`�
 18. **长任务空闲回收（v0.6.5 已修）**：此前 `sweep()` 只看 `lastUsedAt`，运行超过 10 分钟的任务会被回收杀掉（真实 11 分钟任务、13.3M token 沉没）；现在有 in-flight prompt 的后端不会被回收，任务结束刷新时间。
 19. **read-only 的 ACL 误判（v0.6.5 已修）**：此前只要事件/最终文本里出现 `SetNamedSecurityInfoW` 就会被当作写沙箱失败，导致已产出完整报告的只读任务被标 failed；现在仅「非 read-only 模式 + tool_result.isError」才判定。
 20. **token 预算默认关闭**：`DSH_MCP_MAX_TASK_TOKENS=0`；建议真实使用设 3M–8M，防止单个失控任务烧掉大量额度。超限任务会被取消并标 failed（不是用户取消），事件流有 `token_budget_exceeded`。
-21. **自动 worktree 只对干净 git 仓库生效**：有未提交改动/非 git 仓库会退回原目录的降级模式；worktree 创建后保留供 leader 审查，需自行清理。
+21. **自动 worktree 只对干净 git 仓库生效**：有未提交改动/非 git 仓库不会复制（直接进入 ACL 降级链的下一级）。worktree 默认按 `DSH_MCP_WORKTREE_TTL_MIN`（24h）自动 `git worktree remove/prune`；清理前如需合入，用 `dsh_result.worktree` 路径审查，`diff.patch` 证据不受清理影响。
 22. **完成通知是外部通道**：MCP 协议无法主动唤醒空闲 leader；`DSH_MCP_NOTIFY_WEBHOOK`/`NOTIFY_CMD` 用于 webhook/桌面通知，未配置时不发通知。
+23. **发布/外部用户建议**：设 `DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK=0` 保持 fail-closed；确认 `DSH_MCP_WORKTREE_ROOT` 位于用户完全控制目录；ACL 失败时 `dsh_result.failure_kind=sandbox_acl` + `sandbox_blocked_detail` 会给出 icacls / 换 worktree root / 显式传 `permission_mode` 三种修法。
 
 ## 排错
 
