@@ -62,6 +62,29 @@ async function runTask(client: Client, manager: TaskManager, task: string): Prom
   return taskId;
 }
 
+/**
+ * 轮询 dsh_audit 直到指定条件满足。
+ * TaskManager 的审计写入是 `void audit.append(...)` 异步落盘：任务进入终态时（runTask 已返回）
+ * audit.jsonl 可能尚未写完，因此断言前必须等待目标事件出现，不能假定「终态可见⇒审计可读」。
+ */
+async function waitForAuditEvent(
+  client: Client,
+  matches: (entries: Array<Record<string, unknown>>) => boolean,
+  timeoutMs = 5_000,
+): Promise<Array<Record<string, unknown>>> {
+  let entries: Array<Record<string, unknown>> = [];
+  await waitFor(
+    async () => {
+      const payload = parsePayload(await client.callTool({ name: 'dsh_audit', arguments: { limit: 20 } }));
+      entries = (payload.entries as Array<Record<string, unknown>> | undefined) ?? [];
+      return matches(entries);
+    },
+    timeoutMs,
+    25,
+  );
+  return entries;
+}
+
 describe('M3 新增工具', () => {
   it('dsh_tasks 返回任务摘要', async () => {
     const { client, manager } = await setup();
@@ -79,8 +102,12 @@ describe('M3 新增工具', () => {
   it('dsh_audit 返回审计事件', async () => {
     const { client, manager } = await setup();
     const taskId = await runTask(client, manager, 'audited-task');
-    const payload = parsePayload(await client.callTool({ name: 'dsh_audit', arguments: { limit: 20 } }));
-    const entries = payload.entries as Array<Record<string, unknown>>;
+    // 终态审计异步落盘：先等待 task_created（该 task_id）与 task_succeeded 都出现，再做原断言
+    const entries = await waitForAuditEvent(client, (list) => {
+      const created = list.some((entry) => entry.event === 'task_created' && entry.task_id === taskId);
+      const succeeded = list.some((entry) => entry.event === 'task_succeeded');
+      return created && succeeded;
+    });
     expect(entries.some((entry) => entry.event === 'task_created' && entry.task_id === taskId)).toBe(true);
     expect(entries.some((entry) => entry.event === 'task_succeeded')).toBe(true);
   });
