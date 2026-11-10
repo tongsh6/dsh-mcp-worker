@@ -30,7 +30,7 @@
 | 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
 | 用量与成本（v0.10.0，合并自本机在用版 bridge） | ✅ `dsh_usage` 按天/cwd 聚合任务数、状态分布、耗时、DSH token 与费用估算（`DSH_MCP_PRICE_*` 单价 / `DSH_MCP_USD_CNY` 汇率）；`dsh_result.usage.cost_usd/cost_cny`、`dsh_metrics.cost`；`dsh_result` 支持 `offset/max_chars` 分页续读 |
 | 幂等与防孤儿（v0.10.0，合并自本机在用版 bridge） | ✅ `dsh_run(idempotency_key)` 重复提交返回同一 task（落盘索引 + 进程内并发去重，默认 24h）；stdio 模式下父进程退出（stdin end/close）会终止运行中 worker，避免孤儿进程 |
-| macOS 适配（v0.10.0） | ✅ 非 Windows 允许主目录作为 cwd（Windows 保留 ACL 沙箱限制）、兼容旧配置 `DSH_MCP_ALLOWED_ROOTS`、默认超时 900→1800s、新增 `scripts/monitor-thread.py`（Codex thread 配额/token 监控）；macOS 实测 `sdk` 后端 + 全局 `dsh 0.1.5`（复用 GUI 凭据）真实任务跑通 |
+| macOS 适配（v0.10.0） | ✅ 非 Windows 允许主目录作为 cwd（Windows 保留 ACL 沙箱限制）、兼容旧配置 `DSH_MCP_ALLOWED_ROOTS`、默认超时 900→1800s、新增 `scripts/monitor-thread.py`（Codex thread 配额/token 监控）；macOS 实测 `sdk` 后端 + **桌面 app 内置 CLI（0.2.2）**（经 wrapper 暴露）真实任务跑通 |
 | cwd 安全校验 | ✅ Windows 拒绝用户主目录（ACL 沙箱限制）；macOS/Linux 允许（v0.10.0 起，与在用版 bridge 对齐） |
 | Claude Code 接入 | ✅ 已注册（user scope）并实测连通：`claude mcp get dsh` → `√ Connected`；`claude -p` 真实调用 `dsh_describe` 成功 |
 | Codex 接入 | ✅ 已写入 `~/.codex/config.toml`，`codex mcp get dsh` 解析正常；**已实测真实调用**：ChatGPT/Codex 桌面 app（OpenAI.Codex 26.1103）17:54 按会话拉起 v0.9.1 worker，MCP initialize 返回 `serverInfo.version=0.9.1`、13/13 工具与白名单一致、approve 免打扰生效（13 次工具调用无弹窗） |
@@ -68,7 +68,7 @@ pnpm test          # 216 个单测（1 项 Windows-only 跳过）
 pnpm smoke         # 真实 DSH 集成烟测（约 30–60s）
 ```
 
-> macOS/Linux 同样适用：把 `cd C:\path\to\dsh-mcp-worker` 换成仓库路径即可。若本机 DSH 版本不支持 `--profile sdk`（如 `0.1.5-rc.2`），先设 `DSH_MCP_BACKEND=headless`（见下文「macOS / Linux + Codex 部署」）。
+> macOS/Linux 同样适用：把 `cd C:\path\to\dsh-mcp-worker` 换成仓库路径即可。macOS 上 DSH 用桌面 app 自带的 CLI（`sdk` 后端，见下文「macOS / Linux + Codex 部署」），**不要重复安装 pnpm 全局 dsh**。
 
 worker 通过 **stdio** 工作，自身不监听任何端口。需要它时由 leader 拉起子进程。
 
@@ -108,10 +108,11 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
 
 **DSH 版本与凭据（macOS 实测，2026-11-11）**：
 
-- **推荐 `sdk` 后端 + 能复用 GUI 凭据的 dsh**：本机 pnpm 全局 `dsh 0.1.5-rc.2` 支持 `--profile sdk`，且能复用 DSH 桌面端的凭据服务；实测 v0.10.0 `DSH_MCP_BACKEND=sdk` 真实任务跑通（`dsh_run` → `dsh_result.output`、`usage.tokens` 与费用估算全部正常），**无需在 MCP 配置里写 API key**。
-- **app 内置 `dsh 0.2.2-rc.1`**：headless 支持 `--json`（事件流/usage 完整），但独立 CLI 进程读不到 GUI 的 credentials service，会报 `MISSING_CREDENTIAL`；要用它需在启动环境提供 `DEEPSEEK_API_KEY`（不要把密钥明文写进 `config.toml`）。
-- **全局 `dsh 0.1.5` 的 headless 不支持 `--json`**，所以不要用 `DSH_MCP_BACKEND=headless` 配 0.1.5：v0.10.0 的 headless 后端依赖 NDJSON 事件流。
-- 结论：macOS 上优先 `DSH_MCP_BACKEND=sdk` + `DSH_MCP_DSH_COMMAND` 指向**能复用 GUI 凭据的 dsh**（本机为 pnpm 全局 `~/Library/pnpm/bin/dsh`）。
+- **唯一安装：桌面 app 自带的 CLI**（本机 `DeepSeek Harness.app`，CLI 版本 `0.2.2-rc.1`）。它的 `sdk` profile 能复用 GUI 凭据：实测 v0.10.0 `DSH_MCP_BACKEND=sdk` + 该 CLI 真实任务跑通（`dsh_run` → `dsh_result.output`、`usage.tokens` 与费用估算全部正常），**无需在 MCP 配置里写 API key**。
+- **app 路径含空格**（`DeepSeek Harness.app`），而 `DSH_MCP_DSH_COMMAND` 走 `shell:true` 会被拆开，所以必须用无空格 wrapper 暴露入口（见迁移步骤 2.5）。
+- **不要为 worker 单独 `pnpm add -g @deepseek-ai/dsh`**：会与 app 内置 CLI 重复安装。本机曾同时存在 pnpm 全局 `0.1.5-rc.2` 与 app 内置 `0.2.2-rc.1`，已移除前者；两者版本不一致还会导致事件格式/凭据行为差异。
+- app 内置 CLI 的 `headless`（`--json`）在独立 CLI 进程下可能读不到 GUI credentials service（`MISSING_CREDENTIAL`），所以 macOS 上优先 `sdk` 后端。
+- 结论：macOS 上 `DSH_MCP_BACKEND=sdk` + `DSH_MCP_DSH_COMMAND` 指向 wrapper（内部 exec app 内置 CLI）。
 
 迁移步骤（保留在用版作为回滚）：
 
@@ -120,6 +121,12 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
    ```bash
    cd ~/workspace/code/github/dsh-mcp-worker
    pnpm install && pnpm build
+   ```
+2.5. 创建 app 内置 CLI 的无空格入口 wrapper（macOS；路径按本机替换）：
+   ```bash
+   printf '#!/bin/sh\nexec "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" "$@"\n' > ~/scripts/dsh-app-cli.sh
+   chmod +x ~/scripts/dsh-app-cli.sh
+   ~/scripts/dsh-app-cli.sh --version   # 应输出版本号（如 0.2.2-rc.1）
    ```
 3. 把 `~/.codex/config.toml` 的 `[mcp_servers.dsh-worker]` 指到本仓库构建产物（或 pnpm 全局包入口），并补上 sdk 后端与白名单（路径按本机替换）：
    ```toml
@@ -136,7 +143,7 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
    HOME = "/Users/<you>"
    DSH_HOME = "/Users/<you>/.dsh"
    DSH_MCP_BACKEND = "sdk"
-   DSH_MCP_DSH_COMMAND = "/Users/<you>/Library/pnpm/bin/dsh"
+   DSH_MCP_DSH_COMMAND = "/Users/<you>/scripts/dsh-app-cli.sh"
    DSH_MCP_DSH_PATCH = "off"
    DSH_MCP_ALLOWED_ROOTS = "/Users/<you>"
    DSH_MCP_MAX_CONCURRENT = "4"
