@@ -165,6 +165,7 @@ Codex 桌面/CLI 自带 multi-agent（`spawn_agent` / `wait_agent` / `followup_t
 - `dsh_result.attempts`：逐次尝试摘要（`permission_mode`、`cwd`、`exit_code`、`acl_blocked`、`final_text_tail`）。首次尝试的 `[DSH:NEEDS_DECISION]` 等结论会保留，不会被后续 worktree/full 重试覆盖；
 - `dsh_result.sandbox_blocked` / `sandbox_blocked_detail`：本次是否撞到 ACL、原文片段；`failure_kind=sandbox_acl` 优先于 `cancelled`；
 - `dsh_result.worktree.path`：worktree 重试的实际执行目录（合入用）；`effective_permission_mode` 是最终权限；
+- `dsh_result.merge_hint`（v0.9.4）：worktree 改动合入原仓库的结构化指引（`base_commit`、`patch_path`、可直接执行的 `apply_command`、审阅提示）。worker **不会自动 apply**：先 `dsh_read_result(source=diff)` 审阅（patch 可能含 `.dsh-*` 探针文件与二进制占位），确认后再执行 `apply_command`；
 - `dsh_result.approval.retry_args`（v0.9.3）：客户端不支持 elicitation 或用户拒绝时给出结构化重提参数（`permission_mode=danger-full-access` + `cwd` + `timeout_s`），可直接作为下一次 `dsh_run` 的参数，不要自己猜。
 
 `outcome=needs_decision` 时：用返回的 `decision_request` 回答，并带上原 `session_id` 续聊；不要把决策请求当失败，也不要猜。

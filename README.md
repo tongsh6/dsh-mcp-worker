@@ -8,12 +8,12 @@
 
 | 项 | 状态 |
 |---|---|
-| 单元测试 | ✅ 176/176 通过（`pnpm test`） |
+| 单元测试 | ✅ 187/187 通过（`pnpm test`） |
 | 真实链路烟测 | ✅ MCP Client → worker → 真实 DSH：问答 + 写文件（`hello-dsh.txt`）全链路通过 |
 | 长驻后端（M1） | ✅ 默认 `backend=sdk`：真实烟测首任务 9s（含一次初始化）、第二任务 **3s**；大仓库真实任务 18.4s（含 initialize）；`headless` 保留为 fallback |
 | 远程传输（M2a） | ✅ `DSH_MCP_TRANSPORT=http`：真实 HTTP 冒烟通过（`/healthz` 200、无 token 401、MCP HTTP 客户端跑真实任务 8s） |
 | 审批桥（M2b） | ✅ `dsh_result` 检测审批阻断 → elicitation 询问授权 → 以 `danger-full-access` 重试（4 个单测覆盖；真实 DSH 审批场景未端到端实测） |
-| 运维治理（M3） | ✅ 任务 TTL 自动清理 + 数量上限（超额淘汰最老已结束任务）、每 cwd 并发配额、审计日志（`dsh_audit`）、任务列表（`dsh_tasks`）、完整产物分页读取（`dsh_read_result`） |
+| 运维治理（M3） | ✅ 任务 TTL 自动清理 + 数量上限（超额淘汰最老已结束任务）、每仓库并发配额、审计日志（`dsh_audit`）、任务列表（`dsh_tasks`）、完整产物分页读取（`dsh_read_result`） |
 | 批量/检索/观测（M4） | ✅ `dsh_batch_run/status/result` 批量派发与聚合、`dsh_search` 历史任务内容检索、`dsh_metrics` 指标快照、轻量 OTel span 导出（真实冒烟捕获到 2 条 `dsh.task` span） |
 | 编码与写文件 | ✅ workspace-write 中文 UTF-8 写入/读回（字节 `E4 B8 AD…`）；read-only 中文输出经 worker **自动双层兼容修复**后回归正常（实测 read-only / workspace-write 均返回 `中文探针：你好`、无 `�`） |
 | Windows ACL 沙箱降级（v0.6.6 → v0.9.2） | ✅ 公司仓库等「仅 Modify ACL」目录请求 workspace-write 时会遇 `SetNamedSecurityInfoW failed (Win32 5): grantWrite`；worker 按 **worktree（workspace-write）→ danger-full-access** 两级兜底，`dsh_result.sandbox_fallback`/`effective_permission_mode` 记录实际模式。v0.9.2 起：① 首条 ACL 失败 **fail-fast** 立即中止 attempt；② worktree 再失败会**二次升级** full；③ `attempts`/`sandbox_blocked` 完整归因；④ `DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK=0` 可禁止自动全权。**worktree 根目录同样必须「完全控制」**（默认 `~/dsh-worktrees` 满足；改到 D 盘受限目录会失效） |
@@ -26,6 +26,7 @@
 | 证据补全（v0.9.1） | ✅ `evidence.edits` 支持真实 DSH 的 `write`/`edit`/`apply_patch` 与 `file_path`；untracked 文件渲染进 `diff.patch`（`new file` + `+ untracked: N files`） |
 | worktree 安全与归因（v0.9.2） | ✅ ACL fail-fast（首条命令 ACL 失败立即中止 attempt，不再空转烧 token）；worktree 重试失败后**二次升级** danger-full-access；`dsh_result.attempts`（逐次尝试+首次决策文本）、`sandbox_blocked`/`sandbox_blocked_detail` 结构化归因；取消/失败不再丢 ACL 归因，也不会「命令全失败却 succeeded」；worktree 按 TTL 自动 `git worktree remove/prune` 清理 |
 | worktree 根记忆与审批桥（v0.9.3） | ✅ worktree 根 ACL 不可用会被写入能力缓存（同 root 的后续任务直接跳过 worktree 尝试，复用 `DSH_MCP_CAPABILITY_TTL_H` TTL 后自动重试）；审批桥在 elicitation 不可用/用户拒绝时返回结构化 `approval.retry_args`（`permission_mode=danger-full-access` + `cwd` + `timeout_s`），leader 可直接重提 |
+| 仓库级并发与合入指引（v0.9.4） | ✅ 并发配额改为按 **git 仓库根** 计（同仓库不同子目录、worktree 任务也串行；非 git 目录回退按 cwd）；`dsh_result.worktree.base_commit` + `merge_hint`（`base_commit` / `patch_path` / 可直接执行的 `apply_command` / 审阅提示），worktree 改动可结构化合入原仓库（不自动 apply） |
 | 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
 | cwd 安全校验 | ✅ 传用户主目录会被拒绝（Windows ACL 沙箱限制） |
 | Claude Code 接入 | ✅ 已注册（user scope）并实测连通：`claude mcp get dsh` → `√ Connected`；`claude -p` 真实调用 `dsh_describe` 成功 |
@@ -290,7 +291,7 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_PERMISSION_MODE` | `auto` | 默认 `auto`（worker 按 cwd 能力自动适配）；也可显式 `read-only` / `workspace-write` / `danger-full-access` |
 | `DSH_MCP_TIMEOUT_S` | `900` | 单任务默认超时（秒） |
 | `DSH_MCP_MAX_CONCURRENT` | `2` | 全局并发任务上限（1–8，另受同 session 串行约束） |
-| `DSH_MCP_MAX_CONCURRENT_PER_CWD` | `1` | 同一 cwd 的并发上限（防止单项目占满） |
+| `DSH_MCP_MAX_CONCURRENT_PER_CWD` | `1` | 同一 **git 仓库根**（含子目录/worktree 任务）的并发上限；非 git 目录回退按 cwd 计（防止单项目占满） |
 | `DSH_MCP_TASK_TTL_MIN` | `1440` | 已结束任务保留分钟数，超时自动清理 |
 | `DSH_MCP_TASK_MAX` | `500` | 任务数上限；超额先淘汰最老的已结束任务 |
 | `DSH_MCP_CLEANUP_INTERVAL_MIN` | `10` | 自动清理间隔（分钟） |
@@ -377,6 +378,7 @@ worker 重启时，未完成的 `queued/running` 任务会被标记为 `failed`�
 21. **自动 worktree 只对干净 git 仓库生效**：有未提交改动/非 git 仓库不会复制（直接进入 ACL 降级链的下一级）。worktree 默认按 `DSH_MCP_WORKTREE_TTL_MIN`（24h）自动 `git worktree remove/prune`；清理前如需合入，用 `dsh_result.worktree` 路径审查，`diff.patch` 证据不受清理影响。
 22. **完成通知是外部通道**：MCP 协议无法主动唤醒空闲 leader；`DSH_MCP_NOTIFY_WEBHOOK`/`NOTIFY_CMD` 用于 webhook/桌面通知，未配置时不发通知。
 23. **发布/外部用户建议**：设 `DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK=0` 保持 fail-closed；确认 `DSH_MCP_WORKTREE_ROOT` 位于用户完全控制目录；ACL 失败时 `dsh_result.failure_kind=sandbox_acl` + `sandbox_blocked_detail` 会给出 icacls / 换 worktree root / 显式传 `permission_mode` 三种修法。
+24. **worktree 改动不会自动合入（v0.9.4）**：`dsh_result.merge_hint` 给出 `base_commit` / `patch_path` / 可直接执行的 `apply_command` 与审阅提示；先 `dsh_read_result(source=diff)` 审阅（patch 可能含 `.dsh-*` 探针文件与二进制占位），确认后再执行 apply。并发配额自 v0.9.4 起按 **git 仓库根** 计（同仓库子目录任务串行，非 git 目录按 cwd）。
 
 ## 排错
 
@@ -399,7 +401,7 @@ worker 重启时，未完成的 `queued/running` 任务会被标记为 `failed`�
 src/
   index.ts         stdio 入口（生产环境装配）
   server.ts        MCP 工具注册（13 个工具 + instructions）
-  task-manager.ts  异步任务：排队/并发/session 串行/每 cwd 配额/TTL 清理/状态机/长轮询/恢复/审计
+  task-manager.ts  异步任务：排队/并发/session 串行/每仓库配额/TTL 清理/状态机/长轮询/恢复/审计
   dsh-runner.ts    headless 后端：spawn dsh、NDJSON 解析、超时、杀进程树、stderr 尾部
   sdk-backend.ts   sdk 后端：长驻进程、initialize、prompt、session.event 映射、取消=杀进程
   sdk-pool.ts      按 cwd + 权限模式缓存后端，空闲回收
@@ -438,7 +440,7 @@ pnpm measure:leader# 扫描 leader 会话用量（Claude transcripts + Codex rol
 pnpm build         # tsc 产物到 dist/
 ```
 
-测试覆盖：NDJSON 解析/截断、输出落盘、session 锁、dsh 进程超时与取消、任务管理器（并发/每 cwd 配额/session 串行/长轮询/恢复/取消/TTL 清理/数量上限/审计）、JSON-RPC 客户端、SDK 长驻后端与池、HTTP 传输（鉴权/healthz）、审批桥、新增只读工具、DSH token 用量提取与累加、DSH 兼容补丁（编码前缀 + GBK 兜底解码；apply/notify/off/幂等/版本漂移）。
+测试覆盖：NDJSON 解析/截断、输出落盘、session 锁、dsh 进程超时与取消、任务管理器（并发/每仓库配额/session 串行/长轮询/恢复/取消/TTL 清理/数量上限/审计）、JSON-RPC 客户端、SDK 长驻后端与池、HTTP 传输（鉴权/healthz）、审批桥、新增只读工具、DSH token 用量提取与累加、DSH 兼容补丁（编码前缀 + GBK 兜底解码；apply/notify/off/幂等/版本漂移）。
 
 ## 发布到 npm（维护者）
 
@@ -475,7 +477,7 @@ License：MIT（见 [LICENSE](LICENSE)）。
 
 - **M1 ✅ 已完成（2026-11-02）**：长驻 `dsh --profile sdk` 后端（默认），一次 initialize 后每任务只发 prompt；保留 `headless` fallback。
 - **M2 🟡 部分完成（2026-11-02）**：HTTP 传输（无状态 Streamable HTTP + Bearer + `/healthz`）与审批桥 v0 已实现并测试；ChatGPT 直连需 Secure MCP Tunnel（无配额）或 OAuth 2.1（未实现），见 [examples/remote-access.md](examples/remote-access.md)。
-- **M3 ✅ 已完成（2026-11-02）**：任务 TTL 清理 + 数量上限、每 cwd 并发配额、审计日志（`dsh_audit`）、`dsh_tasks`、`dsh_read_result`。
+- **M3 ✅ 已完成（2026-11-02）**：任务 TTL 清理 + 数量上限、每 cwd 并发配额（v0.9.4 起按 git 仓库根）、审计日志（`dsh_audit`）、`dsh_tasks`、`dsh_read_result`。
 - **M4 ✅ 已完成（2026-11-02）**：批量派发（fan-out）/ 历史任务检索 / 指标快照 / 轻量 OTel span 导出。
 - **M5 ✅ 已完成（2026-11-02）**：目标达成率测量——worker 侧 DSH token 计量、A/B 对照工具、leader 用量扫描器、口径文档。
 
