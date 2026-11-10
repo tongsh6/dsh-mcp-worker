@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, validateCwd } from '../src/config.js';
 import { DEFAULT_PRICING } from '../src/pricing.js';
@@ -30,7 +30,8 @@ describe('loadConfig（合并自本机在用版 bridge 的配置项）', () => {
   it('幂等 TTL 与目录可配置', () => {
     const config = loadConfig({ DSH_MCP_IDEM_TTL_H: '48', DSH_HOME: '/tmp/dsh-home-test' });
     expect(config.idemTtlMs).toBe(48 * 3_600_000);
-    expect(config.idemDir).toBe('/tmp/dsh-home-test/mcp-idem');
+    // Windows 上 resolve('/tmp/...') 会变成当前盘符的 D:\tmp\...，用同平台规则算期望值。
+    expect(config.idemDir).toBe(join(resolve('/tmp/dsh-home-test'), 'mcp-idem'));
   });
 
   it('兼容本机在用版的 DSH_MCP_ALLOWED_ROOTS（按平台分隔符）', () => {
