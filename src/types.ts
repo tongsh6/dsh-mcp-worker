@@ -122,6 +122,8 @@ export interface TaskRecord {
   status: TaskStatus;
   task: string;
   cwd: string;
+  /** cwd 所属 git 仓库根：per-repo 并发锁 key（非 git/解析失败时缺省，回退 cwd）。 */
+  repoRoot?: string;
   sessionId?: string;
   permissionMode: string;
   /** 用户请求的权限模式（auto 或显式）；用于区分 cwd 能力缓存与执行策略。 */
@@ -148,7 +150,7 @@ export interface TaskRecord {
   /** 瞬态失败自动重试次数。 */
   transientRetries?: number;
   /** 因 ACL 受限自动切换到的可写 worktree。 */
-  worktree?: { path: string; branch: string };
+  worktree?: { path: string; branch: string; base_commit?: string };
   /** 切换 worktree 前的原始 cwd。 */
   originalCwd?: string;
   /** 每次执行尝试的摘要（首次/ worktree 重试/ 全权升级）。 */
@@ -204,6 +206,17 @@ export interface TaskStatusPayload {
   last_text?: string | null;
 }
 
+/** worktree 改动合入原仓库的结构化指引（不自动 apply，保留人工审阅边界）。 */
+export interface TaskMergeHint {
+  /** worktree 基于的提交。 */
+  base_commit: string | null;
+  /** 证据 patch 路径（tracked + untracked，可能含 .dsh-* 探针文件）。 */
+  patch_path: string | null;
+  /** 可直接执行的合入命令（patch_path 存在时给出）。 */
+  apply_command: string | null;
+  note: string;
+}
+
 /** `dsh_result` 的返回结构。 */
 export interface TaskResultPayload {
   task_id: string;
@@ -236,7 +249,9 @@ export interface TaskResultPayload {
   /** 从事件提取的结构化证据（命令退出码/编辑/git 变更）；未采集时为 null。 */
   evidence: TaskEvidence | null;
   /** 因 ACL 受限自动切换到的可写 worktree（leader 可去该路径审查/合入）。 */
-  worktree?: { path: string; branch: string } | null;
+  worktree?: { path: string; branch: string; base_commit?: string } | null;
+  /** worktree 改动的合入指引（无 worktree 时为 null）。 */
+  merge_hint: TaskMergeHint | null;
   /** 是否在本次任务中观察到沙箱 ACL 失败（即使之后升级全权成功也为 true）。 */
   sandbox_blocked: boolean;
   /** ACL 失败原文片段（用于排障与「是环境问题不是模型没干活」的判定）。 */

@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { WorkerConfig } from './config.js';
 import { CwdCapabilityStore } from './capability-store.js';
 import { createDetachedWorktree } from './worktree.js';
 import { cleanupStaleWorktrees } from './worktree-cleanup.js';
+import { resolveRepoRoot } from './repo-root.js';
 import { WorkerError } from './errors.js';
 import type { TaskStore } from './store.js';
 import type {
@@ -14,6 +15,7 @@ import type {
   RunOutcome,
   TaskAttempt,
   TaskEvidence,
+  TaskMergeHint,
   TaskOutcome,
   TaskRecord,
   TaskResultPayload,
@@ -96,7 +98,7 @@ export class TaskManager {
   private readonly sessionAliases = new Map<string, string>();
   /** 终态后的证据采集/落盘 Promise；status/result 会等待它完成，避免读到未写完的 evidence。 */
   private readonly finalizing = new Map<string, Promise<void>>();
-  private readonly activeByCwd = new Map<string, number>();
+  private readonly activeByRepo = new Map<string, number>();
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly progressSinks = new Map<string, (progress: number, message?: string) => void>();
   /** 记录曾经 workspace-write ACL 失败的 cwd：后续同 cwd 直接以 read-only 启动，避免重复失败尝试。 */
@@ -171,6 +173,8 @@ export class TaskManager {
     const requestedMode = input.permissionMode ?? config.defaultPermissionMode;
     const permissionMode = requestedMode === 'auto' ? this.resolveAutoMode(input.cwd) : requestedMode;
     const sessionId = this.resolveSessionId(input.sessionId ?? `mcp-${id}`);
+    // per-repo 并发锁：解析 git 仓库根，子目录/worktree 任务也锁同一仓库；非 git 回退 cwd。
+    const repoRoot = (await resolveRepoRoot(input.cwd).catch(() => null)) ?? undefined;
     // 快速失败：关闭 ACL 自动升级时，已知不可写的目录不再让模型进去空转
     if (
       config.aclFallback === 'off' &&
@@ -194,6 +198,7 @@ export class TaskManager {
       timeoutMs: input.timeoutMs ?? config.defaultTimeoutMs,
       createdAt: this.now(),
       workerPid: process.pid,
+      ...(repoRoot ? { repoRoot } : {}),
       events: [],
       timedOut: false,
     };
@@ -408,6 +413,7 @@ export class TaskManager {
       failure_kind: classifyFailure(record),
       diagnosis: buildDiagnosis(record),
       worktree: record.worktree ?? null,
+      merge_hint: record.worktree ? buildMergeHint(record, evidence) : null,
       sandbox_blocked: record.sandboxBlocked === true,
       sandbox_blocked_detail: record.sandboxBlockedDetail ?? null,
       attempts: (record.attempts ?? []).slice(-4),
@@ -475,11 +481,16 @@ export class TaskManager {
     if (pending) await pending.catch(() => undefined);
   }
 
+  /** 并发锁 key：同一 git 仓库（含子目录/worktree 任务）共享一个 key；非 git 目录按 cwd。 */
+  private repoKeyOf(record: TaskRecord): string {
+    return normalizeCwd(record.repoRoot ?? record.cwd);
+  }
+
   private deriveQueuedReason(record: TaskRecord): QueuedReason | null {
     const sessionId = record.sessionId ? this.resolveSessionId(record.sessionId) : undefined;
     if (sessionId && this.busySessions.has(sessionId)) return 'session';
-    const cwdKey = normalizeCwd(record.cwd);
-    if ((this.activeByCwd.get(cwdKey) ?? 0) >= this.options.config.maxConcurrentPerCwd) return 'concurrency';
+    const repoKey = this.repoKeyOf(record);
+    if ((this.activeByRepo.get(repoKey) ?? 0) >= this.options.config.maxConcurrentPerCwd) return 'concurrency';
     if (this.active.size >= this.options.config.maxConcurrent) return 'concurrency';
     return null;
   }
@@ -492,7 +503,7 @@ export class TaskManager {
         if (!record) return true;
         const sessionId = record.sessionId ? this.resolveSessionId(record.sessionId) : undefined;
         if (sessionId && this.busySessions.has(sessionId)) return false;
-        return (this.activeByCwd.get(normalizeCwd(record.cwd)) ?? 0) < maxConcurrentPerCwd;
+        return (this.activeByRepo.get(this.repoKeyOf(record)) ?? 0) < maxConcurrentPerCwd;
       });
       if (index < 0) return; // 队列里剩下的都在等 session 或 cwd 额度
       const [taskId] = this.queue.splice(index, 1);
@@ -506,7 +517,7 @@ export class TaskManager {
   private async execute(taskId: string): Promise<void> {
     const record = this.mustGet(taskId);
     const timeoutMs = record.timeoutMs ?? this.options.config.defaultTimeoutMs;
-    const cwdKey = normalizeCwd(record.cwd);
+    const repoKey = this.repoKeyOf(record);
     record.status = 'running';
     record.startedAt = this.now();
     // 任务启动时把「请求 ID + 最新实际 ID」都计入占用；运行期换号只增不减，直到任务结束。
@@ -518,7 +529,7 @@ export class TaskManager {
     for (const sessionId of sessionLocks) this.busySessions.add(sessionId);
     this.sessionLocks.set(taskId, sessionLocks);
     if (resolvedSessionId) record.sessionId = resolvedSessionId;
-    this.activeByCwd.set(cwdKey, (this.activeByCwd.get(cwdKey) ?? 0) + 1);
+    this.activeByRepo.set(repoKey, (this.activeByRepo.get(repoKey) ?? 0) + 1);
     await this.saveQuietly(record);
     this.audit({
       event: 'task_started',
@@ -711,9 +722,9 @@ export class TaskManager {
       } else if (record.sessionId) {
         this.busySessions.delete(record.sessionId);
       }
-      const remaining = (this.activeByCwd.get(cwdKey) ?? 1) - 1;
-      if (remaining <= 0) this.activeByCwd.delete(cwdKey);
-      else this.activeByCwd.set(cwdKey, remaining);
+      const remaining = (this.activeByRepo.get(repoKey) ?? 1) - 1;
+      if (remaining <= 0) this.activeByRepo.delete(repoKey);
+      else this.activeByRepo.set(repoKey, remaining);
       this.progressSinks.delete(taskId);
       // 终态审计先于证据采集，保证 status 终态可见时审计已落盘
       this.audit({
@@ -820,7 +831,11 @@ export class TaskManager {
       const worktree = await createDetachedWorktree(record.cwd, this.options.config.worktreeRoot, this.now());
       if (!worktree) return false;
       record.originalCwd = record.originalCwd ?? record.cwd;
-      record.worktree = { path: worktree.path, branch: worktree.branch };
+      record.worktree = {
+        path: worktree.path,
+        branch: worktree.branch,
+        ...(worktree.baseCommit ? { base_commit: worktree.baseCommit } : {}),
+      };
       record.cwd = worktree.path;
       this.handleEvent(record.id, {
         type: 'status',
@@ -1130,6 +1145,19 @@ function countSteps(events: RunEvent[]): number {
     if (event.type === 'status' && event.phase === 'step_end') steps += 1;
   }
   return steps;
+}
+
+/** 生成 worktree 改动的合入指引：只给结构化信息，不自动 apply（保留人工审阅边界）。 */
+function buildMergeHint(record: TaskRecord, evidence: TaskEvidence | null): TaskMergeHint {
+  // patch_path 在生产是绝对路径；测试/自定义 tasksDir 可能是相对路径，合入命令里统一用绝对路径。
+  const patchPath = evidence?.git?.patch_path ? resolve(evidence.git.patch_path) : null;
+  const repoDir = record.originalCwd ?? null;
+  return {
+    base_commit: record.worktree?.base_commit ?? null,
+    patch_path: patchPath,
+    apply_command: patchPath && repoDir ? `git -C "${repoDir}" apply --3way "${patchPath}"` : null,
+    note: 'worktree 改动不会自动合入原仓库；apply 前先用 dsh_read_result(source=diff) 审阅（patch 可能包含 .dsh-* 探针文件与二进制占位）。',
+  };
 }
 
 /** 最近一条 assistant 文本（失败/取消时作为部分成果返回）。 */

@@ -9,6 +9,8 @@ export interface WorktreeInfo {
   path: string;
   branch: string;
   repoRoot: string;
+  /** worktree 基于的提交（合入/审计用）；HEAD 无法解析时为 null。 */
+  baseCommit: string | null;
 }
 
 async function git(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
@@ -42,8 +44,9 @@ export async function createDetachedWorktree(
   const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
   const name = `${basename(repoRoot).replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 40)}-${stamp}`;
   const path = join(worktreeRoot, name);
+  const head = await git(repoRoot, ['rev-parse', 'HEAD']);
   await mkdir(worktreeRoot, { recursive: true });
   const added = await git(repoRoot, ['worktree', 'add', '--detach', path]);
   if (!added.ok) return null;
-  return { path, branch: 'detached', repoRoot };
+  return { path, branch: 'detached', repoRoot, baseCommit: head.ok ? head.stdout.trim() || null : null };
 }
