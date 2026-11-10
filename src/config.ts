@@ -123,7 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
 
   return {
     name: 'dsh-mcp-worker',
-    version: '0.9.0',
+    version: '0.9.1',
     backend: env.DSH_MCP_BACKEND?.trim() === 'headless' ? 'headless' : 'sdk',
     transport: env.DSH_MCP_TRANSPORT?.trim() === 'http' ? 'http' : 'stdio',
     http: {

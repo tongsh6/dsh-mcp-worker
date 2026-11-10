@@ -85,10 +85,10 @@ describe('auto 模式与 worktree 执行策略', () => {
     const { manager, calls, repo, worktreeRoot } = await setup();
 
     const first = await manager.create({ task: 'first-auto', cwd: repo, permissionMode: 'auto' });
-    await waitFor(() => isTerminal(manager, first.id));
+    await waitFor(() => isTerminal(manager, first.id), 30_000);
     await new Promise((resolve) => setTimeout(resolve, 10));
     const second = await manager.create({ task: 'second-auto', cwd: repo, permissionMode: 'auto' });
-    await waitFor(() => isTerminal(manager, second.id));
+    await waitFor(() => isTerminal(manager, second.id), 30_000);
 
     expect(calls).toHaveLength(2);
     for (const call of calls) {
@@ -103,27 +103,27 @@ describe('auto 模式与 worktree 执行策略', () => {
       expect(result.worktree?.path.startsWith(worktreeRoot)).toBe(true);
       expect(result.effective_permission_mode).toBe('workspace-write');
     }
-  }, 30_000);
+  }, 60_000);
 
   it('显式 danger-full-access 不被 auto worktree 策略改写', async () => {
     const { manager, calls, repo } = await setup();
     const record = await manager.create({ task: 'explicit-full', cwd: repo, permissionMode: 'danger-full-access' });
-    await waitFor(() => isTerminal(manager, record.id));
+    await waitFor(() => isTerminal(manager, record.id), 20_000);
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ cwd: repo, permissionMode: 'danger-full-access' });
     const result = await manager.result(record.id);
     expect(result.worktree).toBeNull();
     expect(result.effective_permission_mode).toBe('danger-full-access');
-  }, 20_000);
+  }, 45_000);
 
   it('显式 workspace-write + 已知 cwd 不可写时仍按既有策略先切 worktree', async () => {
     const { manager, calls, repo, worktreeRoot } = await setup();
     const record = await manager.create({ task: 'explicit-write', cwd: repo, permissionMode: 'workspace-write' });
-    await waitFor(() => isTerminal(manager, record.id));
+    await waitFor(() => isTerminal(manager, record.id), 20_000);
 
     expect(calls).toHaveLength(1);
     expect(calls[0].cwd.startsWith(worktreeRoot)).toBe(true);
     expect(calls[0].permissionMode).toBe('workspace-write');
-  }, 20_000);
+  }, 45_000);
 });

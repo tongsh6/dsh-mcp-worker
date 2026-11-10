@@ -58,7 +58,15 @@ export interface CommandEvidence {
 
 export interface EditEvidence {
   path: string;
-  ops: { create?: number; str_replace?: number; insert?: number };
+  ops: {
+    create?: number;
+    write?: number;
+    edit?: number;
+    str_replace?: number;
+    insert?: number;
+    apply_patch?: number;
+    other?: number;
+  };
   errors: number;
 }
 

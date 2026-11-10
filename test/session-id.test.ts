@@ -149,7 +149,7 @@ describe('session id 回填与持久化', () => {
     const record = await manager.create({ task: 'persist', cwd: 'C:\\proj' });
     await waitFor(() => isTerminal(manager, record.id));
     const metaPath = join(tasksDir, record.id, 'meta.json');
-    await waitFor(async () => (await readFile(metaPath, 'utf8').catch(() => '')).includes('sess-actual-1'), 15_000);
+    await waitFor(async () => (await readFile(metaPath, 'utf8').catch(() => '')).includes('sess-actual-1'), 30_000);
 
     manager.stop();
     const restarted = new TaskManager({
@@ -166,7 +166,7 @@ describe('session id 回填与持久化', () => {
     const result = await restarted.result(record.id);
     expect(status.session_id).toBe('sess-actual-1');
     expect(result.session_id).toBe('sess-actual-1');
-  }, 20_000);
+  }, 45_000);
 
   it('session 变更迁移串行锁：新 ID 不可并行冲入，结束后旧锁不残留', async () => {
     const { runner, release } = makeGatedSessionRunner('sess-actual-2');

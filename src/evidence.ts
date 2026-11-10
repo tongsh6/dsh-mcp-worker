@@ -18,7 +18,14 @@ interface NormalizedResult {
 }
 
 const COMMAND_TOOLS = new Set(['pwsh', 'bash', 'shell', 'cmd', 'powershell']);
-const EDIT_TOOLS = new Set(['str_replace_editor', 'str_replace_based_edit_tool', 'editor']);
+const EDIT_TOOLS = new Set([
+  'str_replace_editor',
+  'str_replace_based_edit_tool',
+  'editor',
+  'write',
+  'edit',
+  'apply_patch',
+]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value === 'string') {
@@ -106,12 +113,25 @@ function commandEvidence(call: NormalizedCall, result: NormalizedResult | undefi
 }
 
 function accumulateEdit(edits: Map<string, EditEvidence>, call: NormalizedCall, result: NormalizedResult | undefined): void {
-  const path = typeof call.args.path === 'string' ? call.args.path : '(unknown)';
+  const path =
+    typeof call.args.file_path === 'string'
+      ? call.args.file_path
+      : typeof call.args.path === 'string'
+        ? call.args.path
+        : typeof call.args.file === 'string'
+          ? call.args.file
+          : '(unknown)';
   const entry = edits.get(path) ?? { path, ops: {}, errors: 0 };
-  const op = typeof call.args.command === 'string' ? call.args.command : 'other';
-  if (op === 'create' || op === 'str_replace' || op === 'insert') {
-    entry.ops[op] = (entry.ops[op] ?? 0) + 1;
+  let op: keyof EditEvidence['ops'] = 'other';
+  if (call.tool === 'write') op = 'write';
+  else if (call.tool === 'edit') op = 'edit';
+  else if (call.tool === 'apply_patch') op = 'apply_patch';
+  else if (typeof call.args.command === 'string') {
+    if (call.args.command === 'create' || call.args.command === 'str_replace' || call.args.command === 'insert') {
+      op = call.args.command;
+    }
   }
+  entry.ops[op] = (entry.ops[op] ?? 0) + 1;
   if (result?.isError) entry.errors += 1;
   edits.set(path, entry);
 }

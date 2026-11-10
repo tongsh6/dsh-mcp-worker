@@ -45,10 +45,12 @@ describe('git-evidence：基线、变更文件与 diff 落盘', () => {
       expect(untracked).toMatchObject({ status: '??', pre_existing: false });
       expect(evidence?.summary?.untracked).toBe(1);
       expect(evidence?.summary?.insertions ?? 0).toBeGreaterThan(0);
+      expect(evidence?.diff_stat).toContain('untracked: 1 files');
       expect(evidence?.patch_path).toBeTruthy();
       const patch = await readFile(evidence!.patch_path!, 'utf8');
       expect(patch).toContain('tracked.txt');
-      expect(patch).not.toContain('new-file.txt');
+      expect(patch).toContain('new-file.txt');
+      expect(patch).toContain('new file mode');
     } finally {
       await rm(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => undefined);
       await rm(taskDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => undefined);

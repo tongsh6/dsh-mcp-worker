@@ -85,8 +85,7 @@ describe('evidence：工具事件归一化与退出码', () => {
     expect(evidence.commands[evidence.commands.length - 1]?.command).toBe('cmd-59');
   });
 
-  it('str_replace_editor 按 path 聚合 ops 与 errors', () => {
-    const events: RunEvent[] = [
+  it('str_replace_editor 按 path 聚合 ops 与 errors', () => {    const events: RunEvent[] = [
       sdkCall('e1', 'str_replace_editor', { command: 'create', path: 'a.txt' }),
       sdkResult('e1', 'ok'),
       sdkCall('e2', 'str_replace_editor', { command: 'str_replace', path: 'a.txt' }),
@@ -96,6 +95,20 @@ describe('evidence：工具事件归一化与退出码', () => {
     ];
     const evidence = extractEvidence(events);
     expect(evidence.edits).toEqual([{ path: 'a.txt', ops: { create: 1, str_replace: 1, insert: 1 }, errors: 1 }]);
+    expect(evidence.summary.edits_failed).toBe(1);
+  });
+
+  it('write / edit 工具按 file_path 聚合（真实 DSH 形态）', () => {
+    const events: RunEvent[] = [
+      sdkCall('w1', 'write', { file_path: 'a.txt', content: 'x' }),
+      sdkResult('w1', 'ok'),
+      sdkCall('e1', 'edit', { file_path: 'a.txt' }),
+      sdkResult('e1', 'ok'),
+      sdkCall('w2', 'write', { file_path: 'a.txt', content: 'y' }),
+      sdkResult('w2', 'bad', true),
+    ];
+    const evidence = extractEvidence(events);
+    expect(evidence.edits).toEqual([{ path: 'a.txt', ops: { write: 2, edit: 1 }, errors: 1 }]);
     expect(evidence.summary.edits_failed).toBe(1);
   });
 
