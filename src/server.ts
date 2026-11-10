@@ -209,7 +209,7 @@ export function createWorkerServer(deps: WorkerServerDeps): McpServer {
   registerTool(server, 'dsh_result', {
     title: '获取 DSH 任务结果',
     description:
-      '任务结束后获取最终结果。验收优先看 `evidence`（命令退出码、变更文件、git diff 摘要）与 `outcome`（completed/needs_decision/failed/cancelled）；`output` 是 DSH 的叙述。输出过大时会自动落盘并返回文件路径。任务未结束时返回错误。',
+      '任务结束后获取最终结果。验收优先看 `evidence`（命令退出码、变更文件、git diff 摘要）与 `outcome`（completed/needs_decision/failed/cancelled）；失败/取消时看 `failure_kind`（如 sandbox_acl）、`sandbox_blocked`/`sandbox_blocked_detail` 与 `attempts`（逐次尝试 + 首次决策文本，避免归因丢失）；`output` 是 DSH 的叙述。输出过大时会自动落盘并返回文件路径。任务未结束时返回错误。',
     inputSchema: {
       task_id: z.string().min(1).describe('dsh_run 返回的任务 id'),
     },

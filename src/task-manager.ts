@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { WorkerConfig } from './config.js';
 import { CwdCapabilityStore } from './capability-store.js';
 import { createDetachedWorktree } from './worktree.js';
+import { cleanupStaleWorktrees } from './worktree-cleanup.js';
 import { WorkerError } from './errors.js';
 import type { TaskStore } from './store.js';
 import type {
@@ -11,6 +12,7 @@ import type {
   QueuedReason,
   RunEvent,
   RunOutcome,
+  TaskAttempt,
   TaskEvidence,
   TaskOutcome,
   TaskRecord,
@@ -99,6 +101,8 @@ export class TaskManager {
   private readonly progressSinks = new Map<string, (progress: number, message?: string) => void>();
   /** 记录曾经 workspace-write ACL 失败的 cwd：后续同 cwd 直接以 read-only 启动，避免重复失败尝试。 */
   private readonly aclBlockedCwds = new Map<string, { reason: string; at: number }>();
+  /** 当前运行中的 attempt（用于把 ACL 事件记到对应 attempt 上，并触发 fail-fast 中止）。 */
+  private readonly activeAttempts = new Map<string, TaskAttempt>();
   /** cwd 能力缓存（落盘，跨 worker 进程）；null = 测试/关闭。 */
   private readonly capabilities: CwdCapabilityStore | null;
   private readonly now: () => number;
@@ -137,6 +141,7 @@ export class TaskManager {
       this.tasks.set(record.id, record);
     }
     this.sweep();
+    void this.cleanupWorktrees().catch(() => undefined);
     this.startCleanup();
   }
 
@@ -403,6 +408,9 @@ export class TaskManager {
       failure_kind: classifyFailure(record),
       diagnosis: buildDiagnosis(record),
       worktree: record.worktree ?? null,
+      sandbox_blocked: record.sandboxBlocked === true,
+      sandbox_blocked_detail: record.sandboxBlockedDetail ?? null,
+      attempts: (record.attempts ?? []).slice(-4),
       retries: record.transientRetries ?? 0,
       usage: {
         steps: countSteps(record.events),
@@ -418,6 +426,7 @@ export class TaskManager {
     if (isTerminalStatus(record.status)) {
       return { task_id: taskId, cancelled: false, status: record.status };
     }
+    record.cancelRequested = true;
 
     const queuedIndex = this.queue.indexOf(taskId);
     if (queuedIndex >= 0) {
@@ -573,26 +582,34 @@ export class TaskManager {
     }
 
     try {
-      let outcome = await this.runAttempt(record, initialPermission, timeoutMs, preFallback || record.worktree ? 2 : 1);
-      const aclBlocked =
-        record.permissionMode === 'workspace-write' &&
-        (record.sandboxBlocked === true || (outcome.exitCode !== 0 && isSandboxAclFailure(outcome)));
-      const canFallback =
-        fallbackTarget !== null && record.permissionMode === 'workspace-write' && !outcome.cancelled && aclBlocked;
-      let fellBack = false;
-      if (canFallback) {
-        const reason = (record.sandboxBlockedDetail ?? outcome.errorMessage ?? outcome.stderrTail ?? 'sandbox acl grant failed').slice(
-          0,
-          500,
-        );
+      const autoFallbackEligible = record.permissionMode === 'workspace-write';
+      let attemptNo = preFallback || record.worktree ? 2 : 1;
+      let outcome = await this.runAttempt(record, initialPermission, timeoutMs, attemptNo);
+      // 降级链（最多 3 段）：原目录 workspace-write → worktree workspace-write → danger-full-access。
+      // 每段结束都重新判定 ACL 失败；worktree 分支不再消耗掉唯一一次兜底机会。
+      let chainGuard = 0;
+      while (autoFallbackEligible && chainGuard < 3) {
+        chainGuard += 1;
+        const attempt = record.attempts?.[record.attempts.length - 1];
+        if (attempt?.acl_blocked !== true) break;
+        // 调用方取消（非 worker 内部 ACL fail-fast）：不再自动降级
+        if (outcome.cancelled && !record.aclAbort) break;
+        const reason = (record.sandboxBlockedDetail ?? outcome.errorMessage ?? outcome.stderrTail ?? 'sandbox acl grant failed')
+          .slice(0, 500)
+          .replaceAll('\u0000', '');
         // D2：先尝试可写 worktree（不改仓库 ACL、不用全权）
         if (config.autoWorktree && !record.worktree && (await this.attachWorktree(record))) {
-          void this.capabilities?.set(record.originalCwd ?? record.cwd, 'danger-full-access', reason);
-          record.sandboxBlocked = false;
-          outcome = await this.runAttempt(record, 'workspace-write', timeoutMs, 2);
-          fellBack = true;
-        } else {
-          record.sandboxFallback = { from: record.permissionMode, to: fallbackTarget, reason };
+          record.aclAbort = false;
+          attemptNo += 1;
+          outcome = await this.runAttempt(record, 'workspace-write', timeoutMs, attemptNo);
+          continue;
+        }
+        // 第二级：升级全权（可用 DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK=0 关闭；read-only 降级不受该开关限制）
+        const fullAccessAllowed = fallbackTarget !== 'danger-full-access' || config.allowFullAccessFallback;
+        if (fallbackTarget !== null && fullAccessAllowed) {
+          record.sandboxFallback = { from: 'workspace-write', to: fallbackTarget, reason };
+          record.permissionMode = fallbackTarget;
+          record.aclAbort = false;
           this.handleEvent(taskId, {
             type: 'status',
             phase: 'sandbox_fallback',
@@ -608,24 +625,27 @@ export class TaskManager {
             detail: reason,
           });
           this.notify(taskId);
-          record.permissionMode = fallbackTarget;
-          record.sandboxBlocked = false;
           void this.capabilities?.set(record.cwd, fallbackTarget, reason);
-          outcome = await this.runAttempt(record, fallbackTarget, timeoutMs, 2);
-          fellBack = true;
+          attemptNo += 1;
+          outcome = await this.runAttempt(record, fallbackTarget, timeoutMs, attemptNo);
+          break;
         }
-      }
-      if (!fellBack && aclBlocked && !outcome.cancelled) {
-        outcome = {
-          ...outcome,
-          errorMessage: `${outcome.errorMessage ?? '沙箱 ACL 授权失败（任务没有实际执行）'}\n\n[worker] ${sandboxAclHint()}`,
-        };
+        break;
       }
       this.applyOutcome(record, outcome, timeoutMs);
-      // 沙箱授权失败但未降级时，即使 DSH 回合正常结束也不能算成功（实际什么都没执行）
-      if (!fellBack && aclBlocked && !canFallback && (record.status as TaskStatus) === 'succeeded') {
+      // 最近一次 attempt 仍被 ACL 拦住时不能算成功/不能算完成（防「命令全没执行却 succeeded」的静默假成功）
+      const lastAttempt = record.attempts?.[record.attempts.length - 1];
+      const lastAclBlocked = lastAttempt?.acl_blocked === true;
+      const aclHint = `[worker] ${sandboxAclHint()}`;
+      if ((record.status as TaskStatus) === 'succeeded' && lastAclBlocked) {
         record.status = 'failed';
-        record.error = outcome.errorMessage ?? sandboxAclHint();
+        record.error = `${record.sandboxBlockedDetail ?? '沙箱 ACL 授权失败（命令未实际执行）'}\n\n${aclHint}`;
+      } else if ((record.status as TaskStatus) === 'cancelled' && record.aclAbort && !record.cancelRequested) {
+        // worker 因 ACL fail-fast 主动中止，不是调用方取消：按环境失败上报，避免误报 cancelled
+        record.status = 'failed';
+        record.error = `${record.sandboxBlockedDetail ?? '沙箱 ACL 授权失败（命令未实际执行）'}\n\n${aclHint}`;
+      } else if ((record.status as TaskStatus) === 'failed' && lastAclBlocked && !String(record.error ?? '').includes('[worker]')) {
+        record.error = `${record.error ?? '沙箱 ACL 授权失败'}\n\n${aclHint}`;
       }
       // token 预算超限：取消后统一标为 failed（不能标成用户取消），并给出明确原因
       if (record.tokenBudgetExceeded) {
@@ -793,6 +813,31 @@ export class TaskManager {
     }
   }
 
+  /**
+   * 清理超过保留期的 worktree：只处理已结束任务且目录位于 worktreeRoot 内的路径，
+   * 通过 `git worktree remove/prune` 回收，不删除任务证据（diff.patch 仍在任务目录）。
+   */
+  private async cleanupWorktrees(): Promise<void> {
+    const config = this.options.config;
+    if (!config.worktreeCleanup || config.worktreeTtlMs <= 0) return;
+    try {
+      const result = await cleanupStaleWorktrees({
+        tasksDir: config.tasksDir,
+        worktreeRoot: config.worktreeRoot,
+        ttlMs: config.worktreeTtlMs,
+        now: this.now(),
+      });
+      if (result.removed.length > 0 || result.pruned.length > 0 || result.failed.length > 0) {
+        this.audit({
+          event: 'task_worktree_cleanup',
+          detail: `removed=${result.removed.length} pruned=${result.pruned.length} failed=${result.failed.length}`,
+        });
+      }
+    } catch {
+      // worktree 清理失败不影响任务执行/服务可用性
+    }
+  }
+
   /** 找同一 session id 的上一轮已结束任务，生成续聊摘要（用于新 session 恢复时补上下文）。 */
   private buildResumeContext(record: TaskRecord): string | undefined {
     if (!record.sessionId) return undefined;
@@ -820,6 +865,19 @@ export class TaskManager {
     timeoutMs: number,
     attempt = 1,
   ): Promise<RunOutcome> {
+    // 先登记 attempt 再启动，保证 ACL 事件能归到本次尝试上；失败/取消也保留摘要。
+    const tracked: TaskAttempt = {
+      index: (record.attempts?.length ?? 0) + 1,
+      permission_mode: permissionMode,
+      cwd: record.cwd,
+      exit_code: null,
+      cancelled: false,
+      timed_out: false,
+      acl_blocked: false,
+      final_text_tail: null,
+    };
+    (record.attempts ??= []).push(tracked);
+    this.activeAttempts.set(record.id, tracked);
     const input: TaskRunInput = {
       id: record.id,
       task: record.task,
@@ -834,8 +892,15 @@ export class TaskManager {
     const handle = this.options.runner(input);
     this.active.set(record.id, handle);
     try {
-      return await handle.outcome;
+      const outcome = await handle.outcome;
+      tracked.exit_code = outcome.exitCode;
+      tracked.cancelled = outcome.cancelled;
+      tracked.timed_out = outcome.timedOut;
+      tracked.acl_blocked = tracked.acl_blocked || (outcome.exitCode !== 0 && isSandboxAclFailure(outcome));
+      tracked.final_text_tail = outcome.finalText ? outcome.finalText.slice(0, 500) : null;
+      return outcome;
     } finally {
+      if (this.activeAttempts.get(record.id) === tracked) this.activeAttempts.delete(record.id);
       this.active.delete(record.id);
     }
   }
@@ -858,6 +923,33 @@ export class TaskManager {
           record.sandboxBlocked = true;
           record.sandboxBlockedDetail =
             sandboxAclFailureDetail(eventJson) ?? 'SetNamedSecurityInfoW failed (Win32 5): grantWrite';
+          const attempt = this.activeAttempts.get(taskId);
+          if (attempt) attempt.acl_blocked = true;
+          // fail-fast：已知命令根本执行不了，不再让模型空转/等长超时；立即中止本次 attempt 进入降级决策。
+          if (
+            this.options.config.aclFailFast &&
+            !record.aclAbort &&
+            !record.cancelRequested &&
+            (record.status as TaskStatus) === 'running'
+          ) {
+            record.aclAbort = true;
+            const abortEvent: RunEvent = {
+              type: 'status',
+              phase: 'sandbox_acl_abort',
+              detail: record.sandboxBlockedDetail,
+            };
+            record.events.push(abortEvent);
+            this.audit({
+              event: 'task_acl_abort',
+              task_id: taskId,
+              cwd: record.cwd,
+              session_id: record.sessionId,
+              detail: record.sandboxBlockedDetail,
+            });
+            void this.options.store.appendEvent(taskId, abortEvent).catch(() => undefined);
+            this.notify(taskId);
+            this.active.get(taskId)?.cancel();
+          }
         }
       }
     }
@@ -955,6 +1047,7 @@ export class TaskManager {
       } catch {
         // 清理失败不影响任务执行
       }
+      void this.cleanupWorktrees().catch(() => undefined);
     }, interval);
     this.cleanupTimer.unref?.();
   }
@@ -1035,10 +1128,16 @@ function isProcessAlive(pid: number): boolean {
 /** 失败分类：便于 leader 决定「重试 / 修环境 / 换粒度」。 */
 function classifyFailure(record: TaskRecord): string | null {
   if (record.status === 'succeeded') return null;
-  if (record.status === 'cancelled') return 'cancelled';
   const error = `${record.error ?? ''}\n${record.sandboxFallback ? 'sandbox_fallback' : ''}`;
   if (record.tokenBudgetExceeded || /token_budget_exceeded/i.test(error)) return 'token_budget';
-  if (record.sandboxFallback || /SetNamedSecurityInfoW|grantWrite|sandbox_acl/i.test(error)) return 'sandbox_acl';
+  // ACL 归因优先于 cancelled：任务可能因环境不可用被 leader 取消，但根因是沙箱 ACL。
+  const aclBlocked =
+    record.sandboxBlocked === true ||
+    record.sandboxFallback !== undefined ||
+    (record.attempts ?? []).some((attempt) => attempt.acl_blocked) ||
+    /SetNamedSecurityInfoW|grantWrite|sandbox_acl/i.test(error);
+  if (aclBlocked) return 'sandbox_acl';
+  if (record.status === 'cancelled') return 'cancelled';
   if (/already exists|session_resume/i.test(error)) return 'session_conflict';
   if (/initialize|SDK 后端启动失败|JSON-RPC 请求超时/i.test(error)) return 'backend_init';
   if (/SDK 后端|进程退出|已被终止/i.test(error)) return 'backend_crash';
@@ -1048,7 +1147,8 @@ function classifyFailure(record: TaskRecord): string | null {
 }
 
 const FAILURE_SUGGESTIONS: Record<string, string> = {
-  sandbox_acl: '该目录 ACL 不允许 DSH 写沙箱；无需处理（worker 会自动用 worktree 或 full），也可显式传 read-only。',
+  sandbox_acl:
+    '该目录或 worktree 根 ACL 不允许 DSH 写沙箱（需要完全控制/WRITE_OWNER）。可执行：icacls "<cwd>" /grant "<用户>:(OI)(CI)F"（先确认合规）；或把 DSH_MCP_WORKTREE_ROOT 指到完全控制目录（如 %USERPROFILE%\\dsh-worktrees）；或显式传 permission_mode=danger-full-access / read-only。',
   session_conflict: 'worker 已自动换新 session 恢复；如需完整历史请在 worker 存活期内续聊。',
   backend_init: 'DSH 后端初始化失败（已自动重试/降级）；若持续复现检查 DSH 安装与网络。',
   backend_crash: 'DSH 后端异常退出（已自动重试一次）；若持续复现检查内存/日志。',

@@ -72,6 +72,14 @@ export interface WorkerConfig {
   autoWorktree: boolean;
   /** 自动 worktree 的根目录。 */
   worktreeRoot: string;
+  /** 观察到 ACL 失败后是否立即中止当前 attempt（不再等模型/超时自然结束，避免烧 token）。 */
+  aclFailFast: boolean;
+  /** ACL 降级是否允许升级 danger-full-access（发布给他人使用时建议关掉，默认保持兼容）。 */
+  allowFullAccessFallback: boolean;
+  /** 终态任务过期后是否自动清理 worktree（默认开）。 */
+  worktreeCleanup: boolean;
+  /** worktree 保留时长（毫秒），过期后由清理任务移除；0 = 不自动清理。 */
+  worktreeTtlMs: number;
   /** 任务完成通知 webhook（POST JSON）。 */
   notifyWebhook?: string;
   /** 任务完成通知命令（带 DSH_MCP_NOTIFY_JSON 环境变量）。 */
@@ -123,7 +131,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
 
   return {
     name: 'dsh-mcp-worker',
-    version: '0.9.1',
+    version: '0.9.2',
     backend: env.DSH_MCP_BACKEND?.trim() === 'headless' ? 'headless' : 'sdk',
     transport: env.DSH_MCP_TRANSPORT?.trim() === 'http' ? 'http' : 'stdio',
     http: {
@@ -159,6 +167,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     retryTransient: readBool(env, 'DSH_MCP_RETRY_TRANSIENT', true),
     autoWorktree: readBool(env, 'DSH_MCP_AUTO_WORKTREE', true),
     worktreeRoot: resolve(env.DSH_MCP_WORKTREE_ROOT?.trim() || join(homedir(), 'dsh-worktrees')),
+    aclFailFast: readBool(env, 'DSH_MCP_ACL_FAIL_FAST', true),
+    allowFullAccessFallback: readBool(env, 'DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK', true),
+    worktreeCleanup: readBool(env, 'DSH_MCP_WORKTREE_CLEANUP', true),
+    worktreeTtlMs: readInt(env, 'DSH_MCP_WORKTREE_TTL_MIN', 1_440, 1, 100_000) * 60_000,
     ...(env.DSH_MCP_NOTIFY_WEBHOOK?.trim() ? { notifyWebhook: env.DSH_MCP_NOTIFY_WEBHOOK.trim() } : {}),
     ...(env.DSH_MCP_NOTIFY_CMD?.trim() ? { notifyCmd: env.DSH_MCP_NOTIFY_CMD.trim() } : {}),
     taskTtlMs: readInt(env, 'DSH_MCP_TASK_TTL_MIN', 1_440, 1, 100_000) * 60_000,

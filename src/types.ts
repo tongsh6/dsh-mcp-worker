@@ -41,6 +41,25 @@ export interface SandboxFallback {
   reason: string;
 }
 
+/**
+ * 单次执行尝试的摘要：leader 可据此追溯「首次 → worktree 重试 → 全权升级」这条降级链，
+ * 并看到首次尝试给出的决策文本（不被后续 attempt 覆盖）。
+ */
+export interface TaskAttempt {
+  /** 第几次尝试（从 1 开始，按执行顺序）。 */
+  index: number;
+  permission_mode: string;
+  /** 本次尝试实际执行的目录（worktree 重试时是 worktree 路径）。 */
+  cwd: string;
+  exit_code: number | null;
+  cancelled: boolean;
+  timed_out: boolean;
+  /** 本次尝试是否被沙箱 ACL 拦截（命令实际未执行）。 */
+  acl_blocked: boolean;
+  /** 本次尝试最终 assistant 文本的尾部（≤500 字符），用于保留 [DSH:NEEDS_DECISION] 等结论。 */
+  final_text_tail: string | null;
+}
+
 /** 任务结果的正交维度（不改变 TaskStatus）。 */
 export type TaskOutcome = 'completed' | 'needs_decision' | 'failed' | 'cancelled';
 
@@ -132,6 +151,12 @@ export interface TaskRecord {
   worktree?: { path: string; branch: string };
   /** 切换 worktree 前的原始 cwd。 */
   originalCwd?: string;
+  /** 每次执行尝试的摘要（首次/ worktree 重试/ 全权升级）。 */
+  attempts?: TaskAttempt[];
+  /** 是否为 worker 因 ACL fail-fast 内部中止（区别于 leader/用户取消）。 */
+  aclAbort?: boolean;
+  /** 是否收到过调用方的取消请求（用于区分「用户取消」与「worker 内部中止」）。 */
+  cancelRequested?: boolean;
   /** 创建该任务的 worker 进程 PID；多 worker 共享任务目录时用于判断任务是否仍被其他活进程执行。 */
   workerPid?: number;
   /** 任务开始前 git 工作树的脏文件基线（porcelain 行）。 */
@@ -212,6 +237,12 @@ export interface TaskResultPayload {
   evidence: TaskEvidence | null;
   /** 因 ACL 受限自动切换到的可写 worktree（leader 可去该路径审查/合入）。 */
   worktree?: { path: string; branch: string } | null;
+  /** 是否在本次任务中观察到沙箱 ACL 失败（即使之后升级全权成功也为 true）。 */
+  sandbox_blocked: boolean;
+  /** ACL 失败原文片段（用于排障与「是环境问题不是模型没干活」的判定）。 */
+  sandbox_blocked_detail: string | null;
+  /** 每次执行尝试的摘要（最多最近 4 次），失败/取消时也保留，避免归因丢失。 */
+  attempts: TaskAttempt[];
   /** 瞬态失败自动重试次数。 */
   retries?: number;
   usage: {
