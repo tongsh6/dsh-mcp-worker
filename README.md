@@ -8,7 +8,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 单元测试 | ✅ 174/174 通过（`pnpm test`） |
+| 单元测试 | ✅ 176/176 通过（`pnpm test`） |
 | 真实链路烟测 | ✅ MCP Client → worker → 真实 DSH：问答 + 写文件（`hello-dsh.txt`）全链路通过 |
 | 长驻后端（M1） | ✅ 默认 `backend=sdk`：真实烟测首任务 9s（含一次初始化）、第二任务 **3s**；大仓库真实任务 18.4s（含 initialize）；`headless` 保留为 fallback |
 | 远程传输（M2a） | ✅ `DSH_MCP_TRANSPORT=http`：真实 HTTP 冒烟通过（`/healthz` 200、无 token 401、MCP HTTP 客户端跑真实任务 8s） |
@@ -25,6 +25,7 @@
 | 结构化证据（v0.9.0） | ✅ `dsh_result.evidence`（命令+退出码/编辑/git 变更+diff）与 `outcome`（completed/needs_decision/failed/cancelled）；`[DSH:NEEDS_DECISION]` 决策协议；`dsh_status` 默认 `detail=summary`；`dsh_read_result(source=diff|evidence)`；`dsh_metrics.outcomes/rework/evidence` |
 | 证据补全（v0.9.1） | ✅ `evidence.edits` 支持真实 DSH 的 `write`/`edit`/`apply_patch` 与 `file_path`；untracked 文件渲染进 `diff.patch`（`new file` + `+ untracked: N files`） |
 | worktree 安全与归因（v0.9.2） | ✅ ACL fail-fast（首条命令 ACL 失败立即中止 attempt，不再空转烧 token）；worktree 重试失败后**二次升级** danger-full-access；`dsh_result.attempts`（逐次尝试+首次决策文本）、`sandbox_blocked`/`sandbox_blocked_detail` 结构化归因；取消/失败不再丢 ACL 归因，也不会「命令全失败却 succeeded」；worktree 按 TTL 自动 `git worktree remove/prune` 清理 |
+| worktree 根记忆与审批桥（v0.9.3） | ✅ worktree 根 ACL 不可用会被写入能力缓存（同 root 的后续任务直接跳过 worktree 尝试，复用 `DSH_MCP_CAPABILITY_TTL_H` TTL 后自动重试）；审批桥在 elicitation 不可用/用户拒绝时返回结构化 `approval.retry_args`（`permission_mode=danger-full-access` + `cwd` + `timeout_s`），leader 可直接重提 |
 | 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
 | cwd 安全校验 | ✅ 传用户主目录会被拒绝（Windows ACL 沙箱限制） |
 | Claude Code 接入 | ✅ 已注册（user scope）并实测连通：`claude mcp get dsh` → `√ Connected`；`claude -p` 真实调用 `dsh_describe` 成功 |
@@ -304,8 +305,8 @@ pnpm measure:leader -- --since-hours 24
 | `DSH_MCP_ALLOW_FULL_ACCESS_FALLBACK` | `1` | 是否允许自动升级 `danger-full-access`；**发布给他人使用建议设 `0`**（保持 fail-closed，由 leader 显式选择）；`read-only` 降级不受影响 |
 | `DSH_MCP_STATUS_WAIT_MAX_S` | `120` | `dsh_status` 单次长轮询等待上限（秒，5–600）；调大可减少 leader 轮询次数 |
 | `DSH_MCP_MAX_TASK_TOKENS` | `0` | **暂缓启用**：单任务 DSH token 预算，默认 `0`=不限制、不产生任何行为。实现已完成但按当前决定不开启；待积累 ≥20 条成功任务后，再按任务类型 p90×1.5 校准并启用（`totalTokens` 94–98% 是 cacheRead，若控成本需另按 input+output 折算） |
-| `DSH_MCP_CAPABILITY_CACHE` | `1` | cwd 能力缓存（落盘，auto 模式据此选权限模式），跨 worker 进程 |
-| `DSH_MCP_CAPABILITY_TTL_H` | `24` | cwd 能力缓存 TTL（小时） |
+| `DSH_MCP_CAPABILITY_CACHE` | `1` | cwd 能力缓存（落盘，auto 模式据此选权限模式），跨 worker 进程；同时记录「worktree 根 ACL 不可用」，避免同 root 反复创建+失败 |
+| `DSH_MCP_CAPABILITY_TTL_H` | `24` | cwd / worktree 根能力缓存 TTL（小时）；修好 ACL 后等 TTL 过期或删缓存文件即可重新尝试 worktree |
 | `DSH_MCP_RETRY_TRANSIENT` | `1` | 后端崩溃/初始化失败时自动重试一次 |
 | `DSH_MCP_AUTO_WORKTREE` | `1` | ACL 受限仓库自动创建可写 worktree（仅干净 git 仓库）。**worktree 根目录必须对当前用户完全控制**，否则 worktree 同样会 ACL 失败 |
 | `DSH_MCP_WORKTREE_ROOT` | `~/dsh-worktrees` | 自动 worktree 根目录；不要指向 ACL 受限的盘/目录（如企业仓库所在的受限 D 盘），默认的用户主目录满足 |

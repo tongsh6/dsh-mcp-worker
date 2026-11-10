@@ -152,13 +152,20 @@ Codex 桌面/CLI 自带 multi-agent（`spawn_agent` / `wait_agent` / `followup_t
 验收只看四样：变更文件、测试结果、风险点、需要 Astra 决策的点。
 ---
 
-## 10. 结构化证据与决策协议（v0.9.0）
+## 10. 结构化证据与决策协议（v0.9.0，v0.9.2/0.9.3 增强）
 
 验收优先看事实，不看叙述：
 
 - `dsh_result.evidence.commands`：命令、退出码、原样标记（exit code / killed / timed out / sandbox denied）；
 - `dsh_result.evidence.git`：变更文件（`pre_existing` 标记任务前已脏）、diff 统计、`patch_path`；完整 diff 用 `dsh_read_result(source=diff)`；
 - `dsh_result.outcome`：`completed` / `needs_decision` / `failed` / `cancelled`（与 `status` 正交）。
+
+**v0.9.2 起失败/取消也带归因（不要再从 events 原文里猜）：**
+
+- `dsh_result.attempts`：逐次尝试摘要（`permission_mode`、`cwd`、`exit_code`、`acl_blocked`、`final_text_tail`）。首次尝试的 `[DSH:NEEDS_DECISION]` 等结论会保留，不会被后续 worktree/full 重试覆盖；
+- `dsh_result.sandbox_blocked` / `sandbox_blocked_detail`：本次是否撞到 ACL、原文片段；`failure_kind=sandbox_acl` 优先于 `cancelled`；
+- `dsh_result.worktree.path`：worktree 重试的实际执行目录（合入用）；`effective_permission_mode` 是最终权限；
+- `dsh_result.approval.retry_args`（v0.9.3）：客户端不支持 elicitation 或用户拒绝时给出结构化重提参数（`permission_mode=danger-full-access` + `cwd` + `timeout_s`），可直接作为下一次 `dsh_run` 的参数，不要自己猜。
 
 `outcome=needs_decision` 时：用返回的 `decision_request` 回答，并带上原 `session_id` 续聊；不要把决策请求当失败，也不要猜。
 
