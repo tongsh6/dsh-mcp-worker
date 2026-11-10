@@ -764,6 +764,13 @@ interface ApprovalBridgeResult {
   required: boolean;
   status?: 'approved' | 'declined' | 'unsupported';
   retried_task_id?: string;
+  /** leader 可原样重提 dsh_run 的参数（declined / unsupported 分支提供，免去自行猜测 cwd/timeout） */
+  retry_args?: {
+    permission_mode: 'danger-full-access';
+    cwd: string;
+    task?: string;
+    timeout_s?: number;
+  };
   message?: string;
 }
 
@@ -778,6 +785,13 @@ async function bridgeApproval(
   config: WorkerConfig,
 ): Promise<ApprovalBridgeResult> {
   const preview = record.task.length > 80 ? `${record.task.slice(0, 80)}…` : record.task;
+  // 同一份重提参数供 declined / unsupported 分支复用；approved 分支已有 retried_task_id，无需再来一份
+  // cwd 优先用 originalCwd：任务可能已切到 worktree，重提应回到原仓库而不是临时 worktree。
+  const retryArgs: ApprovalBridgeResult['retry_args'] = {
+    permission_mode: 'danger-full-access',
+    cwd: record.originalCwd ?? record.cwd,
+    ...(record.timeoutMs ? { timeout_s: Math.round(record.timeoutMs / 1000) } : {}),
+  };
   manager.audit({ event: 'approval_required', task_id: record.id, cwd: record.cwd, detail: preview });
   try {
     const result = await server.server.elicitInput({
@@ -792,7 +806,13 @@ async function bridgeApproval(
     });
     if (result.action !== 'accept' || result.content?.approve !== true) {
       manager.audit({ event: 'approval_declined', task_id: record.id, cwd: record.cwd });
-      return { required: true, status: 'declined', message: '用户未授权重试，任务保持失败状态。' };
+      return {
+        required: true,
+        status: 'declined',
+        retry_args: retryArgs,
+        message:
+          '用户未授权重试，任务保持失败状态；如需继续，可直接用返回的 retry_args 重新调用 dsh_run。',
+      };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -800,7 +820,8 @@ async function bridgeApproval(
     return {
       required: true,
       status: 'unsupported',
-      message: `当前客户端不支持 elicitation（${message}）。请让用户手动以 permission_mode=danger-full-access 重新提交任务。`,
+      retry_args: retryArgs,
+      message: `当前客户端不支持 elicitation（${message}）。请让用户手动以 permission_mode=danger-full-access 重新提交任务，或直接用返回的 retry_args 重新调用 dsh_run。`,
     };
   }
 
