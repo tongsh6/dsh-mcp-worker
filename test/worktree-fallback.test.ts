@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -266,4 +266,70 @@ describe('worktree 二级兜底与 ACL 归因', () => {
       await rm(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }).catch(() => undefined);
     }
   }, 60_000);
+
+  it('worktree 根 ACL 失败会被记住：同 root 的后续任务直接跳过 worktree 重试', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'wt-root-cache-'));
+    try {
+      const { repo, worktreeRoot } = await setupRepo(base);
+      // 第二个任务用同一仓库的子目录，避免命中「该 cwd 已是 danger」的缓存，专门验证 worktree 根缓存。
+      const sub = join(repo, 'sub');
+      await mkdir(sub, { recursive: true });
+      await writeFile(join(sub, 'b.txt'), 'sub', 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-q', '-m', 'sub']);
+      const dshHome = join(base, 'home');
+      const calls: Call[] = [];
+      const { runner } = makeAclRunner(calls, { aclFail: true });
+      const config = makeTestConfig({
+        cleanupIntervalMs: 0,
+        autoWorktree: true,
+        aclFallback: 'danger-full-access',
+        aclFailFast: false,
+        capabilityStore: true,
+        dshHome,
+        worktreeRoot,
+      });
+      const manager = new TaskManager({ runner, store: new MemoryStore(), config });
+      await manager.init();
+      cleanups.push(() => manager.stop());
+
+      const first = await manager.create({ task: 'first-root', cwd: repo });
+      await waitFor(() => isTerminal(manager, first.id), 20_000);
+      const firstResult = await manager.result(first.id);
+      expect(firstResult.status).toBe('succeeded');
+      expect(calls.map((call) => call.permissionMode)).toEqual([
+        'workspace-write',
+        'workspace-write',
+        'danger-full-access',
+      ]);
+      const worktreesAfterFirst = (await readdir(worktreeRoot, { withFileTypes: true })).filter((entry) =>
+        entry.isDirectory(),
+      );
+      expect(worktreesAfterFirst).toHaveLength(1);
+
+      const second = await manager.create({ task: 'second-root', cwd: sub });
+      await waitFor(() => isTerminal(manager, second.id), 20_000);
+      const secondResult = await manager.result(second.id);
+
+      expect(secondResult.status).toBe('succeeded');
+      // 第二次任务：原目录 ACL 失败后直接升级 full（root 已标记不可用，不再创建第二个 worktree）
+      expect(calls.map((call) => call.permissionMode)).toEqual([
+        'workspace-write',
+        'workspace-write',
+        'danger-full-access',
+        'workspace-write',
+        'danger-full-access',
+      ]);
+      expect(secondResult.attempts?.map((attempt) => attempt.permission_mode)).toEqual([
+        'workspace-write',
+        'danger-full-access',
+      ]);
+      const worktreesAfterSecond = (await readdir(worktreeRoot, { withFileTypes: true })).filter((entry) =>
+        entry.isDirectory(),
+      );
+      expect(worktreesAfterSecond).toHaveLength(1);
+    } finally {
+      await rm(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }).catch(() => undefined);
+    }
+  }, 90_000);
 });

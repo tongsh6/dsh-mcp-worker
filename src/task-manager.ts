@@ -533,6 +533,7 @@ export class TaskManager {
     const config = this.options.config;
     const fallbackTarget = config.aclFallback === 'off' ? null : config.aclFallback;
     const cached = this.capabilities?.get(record.cwd) ?? null;
+    const worktreeRootBlocked = this.isWorktreeRootBlocked();
     let initialPermission = record.permissionMode;
     let preFallback = false;
     // cwd 能力缓存记录的是「该目录能否 workspace-write」；auto 的执行策略仍是优先 worktree。
@@ -540,8 +541,14 @@ export class TaskManager {
       record.requestedPermissionMode === 'auto' &&
       record.permissionMode === 'danger-full-access' &&
       cached?.mode === 'danger-full-access' &&
-      config.autoWorktree;
-    if (record.permissionMode === 'workspace-write' && cached?.mode === 'danger-full-access' && config.autoWorktree) {
+      config.autoWorktree &&
+      !worktreeRootBlocked;
+    if (
+      record.permissionMode === 'workspace-write' &&
+      cached?.mode === 'danger-full-access' &&
+      config.autoWorktree &&
+      !worktreeRootBlocked
+    ) {
       await this.attachWorktree(record);
       if (record.worktree) initialPermission = 'workspace-write';
     } else if (autoCachedDanger) {
@@ -597,8 +604,15 @@ export class TaskManager {
         const reason = (record.sandboxBlockedDetail ?? outcome.errorMessage ?? outcome.stderrTail ?? 'sandbox acl grant failed')
           .slice(0, 500)
           .replaceAll('\u0000', '');
+        // 本次失败发生在 worktree 里 ⇒ 该 worktree 根在 TTL 内不可用，后续任务跳过 worktree 直接走 full/失败。
+        if (record.worktree) this.markWorktreeRootBlocked(reason);
         // D2：先尝试可写 worktree（不改仓库 ACL、不用全权）
-        if (config.autoWorktree && !record.worktree && (await this.attachWorktree(record))) {
+        if (
+          config.autoWorktree &&
+          !record.worktree &&
+          !this.isWorktreeRootBlocked() &&
+          (await this.attachWorktree(record))
+        ) {
           record.aclAbort = false;
           attemptNo += 1;
           outcome = await this.runAttempt(record, 'workspace-write', timeoutMs, attemptNo);
@@ -782,6 +796,21 @@ export class TaskManager {
     } catch {
       // 证据采集失败不影响任务结果
     }
+  }
+
+  /** worktree 根能力缓存 key：与 cwd 缓存共用存储，用前缀区分避免与目录路径冲突。 */
+  private worktreeRootCacheKey(): string {
+    return `worktree-root::${this.options.config.worktreeRoot}`;
+  }
+
+  /** worktree 根是否已被记录为 ACL 不可用（TTL 内跳过 worktree 尝试，避免每个任务都重复创建+失败）。 */
+  private isWorktreeRootBlocked(): boolean {
+    return this.capabilities?.get(this.worktreeRootCacheKey())?.mode === 'danger-full-access';
+  }
+
+  /** 记录 worktree 根 ACL 不可用（复用 cwd 能力缓存的 TTL，默认 24h 后自动重试）。 */
+  private markWorktreeRootBlocked(reason: string): void {
+    void this.capabilities?.set(this.worktreeRootCacheKey(), 'danger-full-access', reason);
   }
 
   /** 在 ACL 受限仓库自动切到可写 worktree（D2）；成功返回 true。 */
