@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -32,7 +33,15 @@ export async function resolveRepoRoot(cwd: string): Promise<string | null> {
       maxBuffer: GIT_MAX_BUFFER,
     });
     const repoRoot = String(stdout).trim();
-    return repoRoot ? resolve(repoRoot) : null;
+    if (!repoRoot) return null;
+    const absolute = resolve(repoRoot);
+    // Windows 上 git 可能返回短名（如 C:\Users\RUNNER~1\...）或符号链接形式，而调用方 cwd 可能是长名：
+    // 统一 realpath 展开，保证同一仓库的并发锁 key 稳定一致；展开失败则回退 resolve 结果。
+    try {
+      return await realpath(absolute);
+    } catch {
+      return absolute;
+    }
   } catch {
     // 非 git 仓库（exit≠0）、git 缺失（ENOENT）、超时等一律回退
     return null;

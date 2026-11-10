@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -40,9 +40,14 @@ async function initPlainDir(): Promise<string> {
   return base;
 }
 
-/** Windows 下盘符与路径分隔符大小写不敏感，比较前统一 resolve + 小写。 */
-function samePath(actual: string | null, expected: string): boolean {
-  return typeof actual === 'string' && resolve(actual).toLowerCase() === resolve(expected).toLowerCase();
+/** Windows 下盘符与路径分隔符大小写不敏感，且 git 可能返回短名（RUNNER~1）：比较前统一 realpath + 小写。 */
+async function samePath(actual: string | null, expected: string): Promise<boolean> {
+  if (typeof actual !== 'string') return false;
+  const [a, e] = await Promise.all([
+    realpath(actual).catch(() => resolve(actual)),
+    realpath(expected).catch(() => resolve(expected)),
+  ]);
+  return a.toLowerCase() === e.toLowerCase();
 }
 
 /** 构造一个确定不存在的临时路径（不创建）。 */
@@ -58,7 +63,7 @@ describe('resolveRepoRoot', () => {
 
     expect(root).not.toBeNull();
     expect(isAbsolute(root as string)).toBe(true);
-    expect(samePath(root, repo)).toBe(true);
+    expect(await samePath(root, repo)).toBe(true);
   });
 
   it('仓库子目录 → 仍返回仓库根', async () => {
@@ -68,7 +73,7 @@ describe('resolveRepoRoot', () => {
 
     const root = await resolveRepoRoot(nested);
 
-    expect(samePath(root, repo)).toBe(true);
+    expect(await samePath(root, repo)).toBe(true);
   });
 
   it('非 git 的临时目录 → null', async () => {
@@ -105,7 +110,7 @@ describe('resolveRepoRoot', () => {
     expect(isAbsolute(root as string)).toBe(true);
     // 已规范化：再 resolve 一次不改变结果（无 ..、无尾部分隔符）
     expect(root).toBe(resolve(root as string));
-    expect(samePath(root, repo)).toBe(true);
+    expect(await samePath(root, repo)).toBe(true);
   });
 
   it('不抛异常：空字符串 / 相对路径形式的不存在目录均返回 null', async () => {
