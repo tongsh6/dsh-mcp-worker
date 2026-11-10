@@ -128,11 +128,11 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
    chmod +x ~/scripts/dsh-app-cli.sh
    ~/scripts/dsh-app-cli.sh --version   # 应输出版本号（如 0.2.2-rc.1）
    ```
-3. 把 `~/.codex/config.toml` 的 `[mcp_servers.dsh-worker]` 指到本仓库构建产物（或 pnpm 全局包入口），并补上 sdk 后端与白名单（路径按本机替换）：
+3. 安装 pnpm 全局正式包（`pnpm add -g dsh-mcp-worker@latest`），把 `~/.codex/config.toml` 的 `[mcp_servers.dsh-worker]` 指向 pnpm 全局 bin shim（`command` = `$(pnpm bin -g)/dsh-mcp-worker`，升级后自动跟随，无需改路径；也可用 `node` + 构建产物 `dist/index.js`），并补上 sdk 后端与白名单（路径按本机替换）：
    ```toml
    [mcp_servers.dsh-worker]
-   command = "/Users/<you>/.nvm/versions/node/v24.19.0/bin/node"
-   args = ["/Users/<you>/.../dsh-mcp-worker/dist/index.js"]
+   command = "/Users/<you>/Library/pnpm/bin/dsh-mcp-worker"
+   args = []
    cwd = "/Users/<you>"
    enabled = true
    startup_timeout_sec = 60
