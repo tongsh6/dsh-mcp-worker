@@ -10,7 +10,7 @@ const cleanup: Array<() => Promise<void>> = [];
 
 async function makeEnv(): Promise<{ logPath: string; cwd: string; env: NodeJS.ProcessEnv }> {
   const dir = await mkdtemp(join(tmpdir(), 'fake-sdk-'));
-  cleanup.push(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  cleanup.push(() => rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
   return {
     logPath: join(dir, 'sdk.log'),
     cwd: dir,
@@ -36,6 +36,8 @@ function backendOptions(env: NodeJS.ProcessEnv, cwd: string) {
 }
 
 afterEach(async () => {
+  // Windows 下被杀后端进程的文件句柄释放有延迟：先让出事件循环再带重试清理，避免偶发 EBUSY flake。
+  await new Promise((resolve) => setTimeout(resolve, 100));
   await Promise.all(cleanup.splice(0).map((fn) => fn()));
 });
 
