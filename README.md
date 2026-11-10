@@ -30,7 +30,7 @@
 | 目标测量（v0.6） | ✅ worker 侧 DSH token 计量（`dsh_result.usage.tokens` / `dsh_metrics.tokens`）+ A/B 对照工具 + leader 用量扫描器；真实首测：加速 **2.29x**、leader token 省 **46.0%**、cost 省 **31.1%**、达成率 2/2 |
 | 用量与成本（v0.10.0，合并自本机在用版 bridge） | ✅ `dsh_usage` 按天/cwd 聚合任务数、状态分布、耗时、DSH token 与费用估算（`DSH_MCP_PRICE_*` 单价 / `DSH_MCP_USD_CNY` 汇率）；`dsh_result.usage.cost_usd/cost_cny`、`dsh_metrics.cost`；`dsh_result` 支持 `offset/max_chars` 分页续读 |
 | 幂等与防孤儿（v0.10.0，合并自本机在用版 bridge） | ✅ `dsh_run(idempotency_key)` 重复提交返回同一 task（落盘索引 + 进程内并发去重，默认 24h）；stdio 模式下父进程退出（stdin end/close）会终止运行中 worker，避免孤儿进程 |
-| macOS 适配（v0.10.0） | ✅ 非 Windows 允许主目录作为 cwd（Windows 保留 ACL 沙箱限制）、兼容旧配置 `DSH_MCP_ALLOWED_ROOTS`、默认超时 900→1800s、新增 `scripts/monitor-thread.py`（Codex thread 配额/token 监控） |
+| macOS 适配（v0.10.0） | ✅ 非 Windows 允许主目录作为 cwd（Windows 保留 ACL 沙箱限制）、兼容旧配置 `DSH_MCP_ALLOWED_ROOTS`、默认超时 900→1800s、新增 `scripts/monitor-thread.py`（Codex thread 配额/token 监控）；macOS 实测 `sdk` 后端 + 全局 `dsh 0.1.5`（复用 GUI 凭据）真实任务跑通 |
 | cwd 安全校验 | ✅ Windows 拒绝用户主目录（ACL 沙箱限制）；macOS/Linux 允许（v0.10.0 起，与在用版 bridge 对齐） |
 | Claude Code 接入 | ✅ 已注册（user scope）并实测连通：`claude mcp get dsh` → `√ Connected`；`claude -p` 真实调用 `dsh_describe` 成功 |
 | Codex 接入 | ✅ 已写入 `~/.codex/config.toml`，`codex mcp get dsh` 解析正常；**已实测真实调用**：ChatGPT/Codex 桌面 app（OpenAI.Codex 26.1103）17:54 按会话拉起 v0.9.1 worker，MCP initialize 返回 `serverInfo.version=0.9.1`、13/13 工具与白名单一致、approve 免打扰生效（13 次工具调用无弹窗） |
@@ -106,7 +106,12 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
 | 默认超时 | 1800s | 1800s（v0.10.0 起；旧默认 900s 偏小） |
 | 输出续读 | 字节 `offset` / `max_bytes` | `dsh_result(offset, max_chars)` 字符分页 + `dsh_read_result` |
 
-**注意 DSH 版本**：本机 `dsh --version` 为 `0.1.5-rc.2` 时，长驻 `sdk` 后端（`dsh --profile sdk`）可能不可用。迁移时先设 `DSH_MCP_BACKEND=headless`（每任务一进程），或先用 `dsh --profile sdk --help` 验证本机支持。
+**DSH 版本与凭据（macOS 实测，2026-11-11）**：
+
+- **推荐 `sdk` 后端 + 能复用 GUI 凭据的 dsh**：本机 pnpm 全局 `dsh 0.1.5-rc.2` 支持 `--profile sdk`，且能复用 DSH 桌面端的凭据服务；实测 v0.10.0 `DSH_MCP_BACKEND=sdk` 真实任务跑通（`dsh_run` → `dsh_result.output`、`usage.tokens` 与费用估算全部正常），**无需在 MCP 配置里写 API key**。
+- **app 内置 `dsh 0.2.2-rc.1`**：headless 支持 `--json`（事件流/usage 完整），但独立 CLI 进程读不到 GUI 的 credentials service，会报 `MISSING_CREDENTIAL`；要用它需在启动环境提供 `DEEPSEEK_API_KEY`（不要把密钥明文写进 `config.toml`）。
+- **全局 `dsh 0.1.5` 的 headless 不支持 `--json`**，所以不要用 `DSH_MCP_BACKEND=headless` 配 0.1.5：v0.10.0 的 headless 后端依赖 NDJSON 事件流。
+- 结论：macOS 上优先 `DSH_MCP_BACKEND=sdk` + `DSH_MCP_DSH_COMMAND` 指向**能复用 GUI 凭据的 dsh**（本机为 pnpm 全局 `~/Library/pnpm/bin/dsh`）。
 
 迁移步骤（保留在用版作为回滚）：
 
@@ -116,7 +121,7 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
    cd ~/workspace/code/github/dsh-mcp-worker
    pnpm install && pnpm build
    ```
-3. 把 `~/.codex/config.toml` 的 `[mcp_servers.dsh-worker]` 指到本仓库 `dist/index.js`，并补上 headless 与白名单（路径按本机替换）：
+3. 把 `~/.codex/config.toml` 的 `[mcp_servers.dsh-worker]` 指到本仓库构建产物（或 pnpm 全局包入口），并补上 sdk 后端与白名单（路径按本机替换）：
    ```toml
    [mcp_servers.dsh-worker]
    command = "/Users/<you>/.nvm/versions/node/v24.19.0/bin/node"
@@ -130,10 +135,13 @@ args = ["<scripts/mcp-entry.ps1 输出的路径>"]
    [mcp_servers.dsh-worker.env]
    HOME = "/Users/<you>"
    DSH_HOME = "/Users/<you>/.dsh"
-   DSH_MCP_BACKEND = "headless"
+   DSH_MCP_BACKEND = "sdk"
+   DSH_MCP_DSH_COMMAND = "/Users/<you>/Library/pnpm/bin/dsh"
+   DSH_MCP_DSH_PATCH = "off"
    DSH_MCP_ALLOWED_ROOTS = "/Users/<you>"
    DSH_MCP_MAX_CONCURRENT = "4"
-   PATH = "/Users/<you>/.nvm/versions/node/v24.19.0/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+   DSH_MCP_TIMEOUT_S = "1800"
+   PATH = "/Users/<you>/.nvm/versions/node/v24.19.0/bin:/Users/<you>/Library/pnpm/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
    ```
 4. 重启 Codex / ChatGPT 桌面 app（MCP 工具目录在握手时协商），先在会话里调用 `dsh_describe` / `dsh_usage` 验证，再跑一个真实任务。
    也可不挂载直接自检：
